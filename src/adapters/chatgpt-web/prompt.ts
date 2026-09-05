@@ -403,12 +403,12 @@ export function chatGptReadOnlyContextWarning(
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
   const browserOnlyGuidance = !capabilities.localToolsEnabled
-    ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
+    ? "\n>\n> This is intentional Browser-only operation. Full harness/MCP is not required, and neither the model nor the owner should configure or connect it for this turn. Use the ChatGPT-native and connected capabilities available in this chat, plus any existing Any-Clerk Browser Sol operational surface supplied in the task context."
     : "";
   if (hasLocalEvidence) {
-    return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
+    return `> **Browser-only capability contract**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, and may use ChatGPT-native/connected capabilities and any supplied Any-Clerk operational surface. It cannot read or modify local files through the optional Full-harness bridge.${browserOnlyGuidance}`;
   }
-  return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
+  return `> **Browser-only capability contract**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. It may still use ChatGPT-native/connected capabilities and any supplied Any-Clerk operational surface; the optional Full-harness bridge is not required.${browserOnlyGuidance}`;
 }
 
 export function compileChatGptWebPrompt(
@@ -497,7 +497,7 @@ export function compileChatGptWebPrompt(
     ]
     : [
       `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
-      "Use any ChatGPT-native capabilities available in this chat—including web search, browsing, research, and other first-party tools—whenever they help complete the request. The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available.",
+      "This is intentional Browser-only operation: Full harness/MCP is not required, and do not ask the owner to configure or connect it. Use any ChatGPT-native capabilities available in this chat—including web search, browsing, research, connected tools, and other first-party tools—whenever they help complete the request, plus any existing Any-Clerk Browser Sol operational surface supplied in the task context. The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available.",
       "The task history below already contains everything Codex collected from the user's local workspace. Treat prior local tool results as authoritative snapshots of that earlier work.",
       "Do not claim a new local inspection, command, edit, or verification unless it actually appears in the task history. If the latest request requires fresh local-computer access or a local mutation, state only that exact limitation instead of inventing success.",
       "Otherwise perform the full requested research, analysis, or synthesis with every capability actually available to you; do not stop at a plan or progress report.",

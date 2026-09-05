@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -375,6 +375,99 @@ test("a stalled DOM observation fails within its probe budget", async () => {
     5,
   )).rejects.toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
 
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
+  const submissionAccepted = runBrowserTurn.indexOf("submission accepted evidence=");
+  const recovery = runBrowserTurn.indexOf("await rebindLauncherPage(", submissionAccepted);
+  const duplicateSend = runBrowserTurn.indexOf("sendAttachedPrompt(", recovery);
+
+  const rebindDefinition = runBrowserTurn.indexOf("const rebindLauncherPage");
+  const previousConnection = runBrowserTurn.indexOf(
+    "const previousConnection = turnConnection;",
+    rebindDefinition,
+  );
+  const failClosedDisconnect = runBrowserTurn.indexOf(
+    "connectAfterClosingBrowserConnection(",
+    previousConnection,
+  );
+  const detachClosedConnection = runBrowserTurn.indexOf(
+    "turnConnection = undefined;",
+    failClosedDisconnect,
+  );
+  const reconnectStage = runBrowserTurn.indexOf(
+    "return this.runStage(",
+    detachClosedConnection,
+  );
+  const refreshViewport = runBrowserTurn.indexOf(
+    "refreshViewport: true",
+    reconnectStage,
+  );
+  const reconnectTransport = runBrowserTurn.indexOf(
+    "const rebound = await connectLauncherBrowserHost(",
+    reconnectStage,
+  );
+
+  expect(recovery).toBeGreaterThan(submissionAccepted);
+  expect(duplicateSend).toBe(-1);
+  expect(rebindDefinition).toBeGreaterThan(-1);
+  expect(previousConnection).toBeGreaterThan(rebindDefinition);
+  expect(failClosedDisconnect).toBeGreaterThan(previousConnection);
+  expect(detachClosedConnection).toBeGreaterThan(failClosedDisconnect);
+  expect(reconnectStage).toBeGreaterThan(detachClosedConnection);
+  expect(refreshViewport).toBeGreaterThan(reconnectStage);
+  expect(reconnectTransport).toBeGreaterThan(refreshViewport);
+  expect(runBrowserTurn).not.toContain(
+    "previous browser observation connection did not close after rebind",
+  );
+  expect(runBrowserTurn).toContain(
+    "if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause",
+  );
+  expect(runBrowserTurn.slice(recovery)).toContain("responseTurn.identity");
+});
+
+test("a submission probe stall rebinds the same tab without sending the prompt twice", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const recoveryStart = workerSource.indexOf("  private async waitForSubmissionAcceptedWithRecovery(");
+  const sendStart = workerSource.indexOf("  private async sendAttachedPrompt(");
+  const sendEnd = workerSource.indexOf("  private async waitForMultipartAcknowledgement(", sendStart);
+  const recoverySource = workerSource.slice(recoveryStart, sendStart);
+  const sendSource = workerSource.slice(sendStart, sendEnd);
+  const sendActivation = sendSource.indexOf('await sendButton.press("Enter"');
+  const acceptance = sendSource.indexOf("await this.waitForSubmissionAcceptedWithRecovery(", sendActivation);
+  const recovery = recoverySource.indexOf("await recoverObservation(");
+
+  expect(recoveryStart).toBeGreaterThan(-1);
+  expect(sendActivation).toBeGreaterThan(-1);
+  expect(acceptance).toBeGreaterThan(sendActivation);
+  expect(recovery).toBeGreaterThan(-1);
+  const sendPressCall = 'sendButton.press("Enter"';
+  expect(sendSource.indexOf(sendPressCall, sendActivation + sendPressCall.length)).toBe(-1);
+  expect(recoverySource).toContain(
+    "if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error",
+  );
+  expect(recoverySource).toContain("recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS");
+  expect(sendSource.indexOf("submissionLifecycle?.onSubmitted?.()", acceptance)).toBeGreaterThan(acceptance);
+
+  const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
+  const recoveryDefinition = runBrowserTurn.indexOf("const recoverPageObservation");
+  expect(recoveryDefinition).toBeGreaterThan(-1);
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain(
+    "userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR)",
+  );
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain(
+    "responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR)",
+  );
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain('domCache: {}');
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain("await diagnostics.capture(page, checkpoint)");
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"submission-page-rebound"');
+  expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"assistant-page-rebound"');
+  expect(runBrowserTurn).toContain(
+    "const toolTurnObservationRecovery = turn.externalProgress !== undefined || launcherSurfaceId !== undefined;",
+  );
+  expect((runBrowserTurn.match(/toolTurnObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
+  expect(runBrowserTurn).toContain("stageBaseline = recovered.baseline");
+  expect(runBrowserTurn).toContain("submissionBaseline = recovered.baseline");
+  expect((runBrowserTurn.match(/recoverAssistantObservation\(\.\.\.args\)/g) ?? []).length).toBe(2);
 });
 
 test("an accepted Full-mode send survives one stalled DOM probe and a later MCP batch without resending", async () => {
@@ -3135,6 +3228,50 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
 });
 
+test("browser-native activity survives bounded DOM transitions but not stale silence", () => {
+  expect(CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+  const tracker = new ChatGptNativeTurnActivityTracker(1_000);
+
+  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 1_000)).toBeTrue();
+  // A long native turn remains live while the same activity surface is within the silence bound.
+  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 1_999)).toBeTrue();
+  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 2_000)).toBeFalse();
+  // A new DOM revision starts a fresh bounded window for this same turn.
+  expect(tracker.update({ active: true, domRevision: "response:2", currentText: "Searching 2" }, 3_000)).toBeTrue();
+  expect(tracker.update({ active: false, domRevision: "response:2", currentText: "Searching 2" }, 3_001)).toBeFalse();
+  expect(tracker.deadline()).toBeUndefined();
+});
+
+test("browser-native activity vetoes DOM-health and completion conclusions while live", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const stalled = {
+    responsePresent: true,
+    running: false,
+    currentText: "partial answer",
+    completionActionVisible: false,
+    nativeActivityLive: true,
+  };
+  expect(health.update(stalled, 1_000)).toBeUndefined();
+  expect(health.update(stalled, 10_000)).toBeUndefined();
+
+  const completion = new ChatGptCompletionTracker(500);
+  expect(completion.update({
+    responsePresent: true,
+    running: false,
+    currentText: "complete answer",
+    currentHtml: "<p>complete answer</p>",
+    completionActionVisible: true,
+    nativeActivityInFlight: true,
+  }, 1_000)).toBeFalse();
+  expect(completion.update({
+    responsePresent: true,
+    running: false,
+    currentText: "complete answer",
+    currentHtml: "<p>complete answer</p>",
+    completionActionVisible: true,
+  }, 1_500)).toBeFalse();
+});
+
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async stalledTurnDiagnostic");
@@ -3309,6 +3446,9 @@ test("an accepted turn survives internal observation faults instead of being tor
   // Liveness may postpone a verdict but never waive it, so a tool call that never returns cannot
   // hold an undeadlined turn open forever.
   expect(CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+  expect(worker).toContain("const nativeActivityTracker = new ChatGptNativeTurnActivityTracker();");
+  expect(worker).toContain("nativeActivityInFlight: nativeActivityLive");
+  expect(worker).toContain("active: nativeActivitySignal");
 
   // Chain-of-thought containment is commentary regardless of document position.
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');

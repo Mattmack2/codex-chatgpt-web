@@ -1532,7 +1532,7 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(() => compileChatGptWebPrompt(request, browserOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
     expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("complete accumulated task context");
-    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("web search remain available");
+    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("ChatGPT-native/connected capabilities");
     expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).not.toContain("tools/MCP");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
     expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("does not contain local tool results yet");
