@@ -182,14 +182,16 @@ test("Bigger Context uses the minimum transport and reserves three stages for co
     .toContain("acknowledged_parts: 1/2");
 });
 
-test("browser-only Medium directs users to the full harness", () => {
+test("browser-only Medium names native surfaces without directing users to MCP", () => {
   const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
   const warning = chatGptReadOnlyContextWarning(request("medium"), capabilities);
-  expect(warning).toStartWith("> **Local tools unavailable**");
-  expect(warning).toContain("`MCP`");
-  expect(warning).toContain("`Codex Web GPT`");
-  expect(warning).toContain("`Full`");
-  expect(warning).toContain("selected ChatGPT Web model");
+  expect(warning).toStartWith("> **Browser-only capability contract**");
+  expect(warning).toContain("Full harness/MCP is not required");
+  expect(warning).toContain("ChatGPT-native/connected capabilities");
+  expect(warning).toContain("Any-Clerk operational surface");
+  expect(warning).toContain("neither the model nor the owner should configure or connect it");
+  expect(warning).not.toContain("Open `MCP`");
+  expect(warning).not.toContain("connect the `Full` harness");
   expect(warning).not.toContain("tool-capable ChatGPT Web model first");
   expect(chatGptReadOnlyContextWarning(request("medium"), {
     ...capabilities,
