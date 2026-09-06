@@ -994,6 +994,35 @@ export const browserStageTimeouts = {
   multipartStageAcknowledgement: CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
 } as const;
 
+export const CHATGPT_SEND_REACTIVATION_INNER_BUDGET_MS = 5_000;
+export const CHATGPT_PROGRESS_DIAGNOSTIC_INITIAL_MS = 30_000;
+export const CHATGPT_PROGRESS_DIAGNOSTIC_INTERVAL_MS = 2 * 60_000;
+
+export interface ChatGptTurnProgress {
+  runningDurationMs: number;
+  sinceLastVisibleProgressMs?: number;
+  domRevision?: string;
+  textChars: number;
+  traceBlockCount: number;
+  completionActionVisible: boolean;
+  nativeTurnIdentity?: string;
+}
+
+export function chatGptProgressDiagnosticDue(
+  sentAt: number,
+  lastDiagnosticAt: number | undefined,
+  now: number,
+): boolean {
+  if (now - sentAt < CHATGPT_PROGRESS_DIAGNOSTIC_INITIAL_MS) return false;
+  return lastDiagnosticAt === undefined
+    || now - lastDiagnosticAt >= CHATGPT_PROGRESS_DIAGNOSTIC_INTERVAL_MS;
+}
+
+export function formatChatGptProgressStatus(progress: ChatGptTurnProgress): string {
+  const ageMinutes = Math.floor((progress.sinceLastVisibleProgressMs ?? 0) / 60_000);
+  return `RUNNING — no visible progress for ${ageMinutes}m`;
+}
+
 /**
  * Detects that this process was suspended (system sleep) by watching for gaps in a steady tick.
  * On Apple Silicon the monotonic clock keeps advancing through sleep, so elapsed time alone cannot
@@ -1137,6 +1166,8 @@ export interface BrowserTurn {
   onPreparedSelected?: (reused: boolean) => void | Promise<void>;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
+  /** Advisory structural progress for the existing owner/manager turn-state path. */
+  onProgress?: (progress: ChatGptTurnProgress) => void;
   /** Send activation is the ambiguity boundary after which a fresh surface must not replay this prompt. */
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
@@ -1444,6 +1475,11 @@ export class ChatGptTurnDomHealthTracker {
  */
 export class ChatGptNativeTurnActivityTracker {
   private active = false;
+  private observed = false;
+  private lastProgressAtValue: number | undefined;
+  private lastDomRevision: string | number | undefined;
+  private lastText: string | undefined;
+  private lastHtml: string | undefined;
 
   update(state: {
     active: boolean;
@@ -1451,14 +1487,18 @@ export class ChatGptNativeTurnActivityTracker {
     currentText?: string;
     currentHtml?: string;
   }, now = Date.now()): boolean {
-    // Revisions/text/html remain part of the input because they are useful evidence to the caller,
-    // but they are not an age-based lease. A visible stop/status control is affirmative until the
-    // same turn reports it gone. This prevents a healthy 20–40 minute native turn from expiring
-    // merely because ChatGPT paused DOM mutations.
-    void state.domRevision;
-    void state.currentText;
-    void state.currentHtml;
-    void now;
+    // Revisions/text/html are observation evidence, not an age-based lease. A visible stop/status
+    // control is affirmative until the same turn reports it gone. This prevents a healthy 20–40
+    // minute native turn from expiring merely because ChatGPT paused DOM mutations.
+    const progressed = !this.observed
+      || !Object.is(this.lastDomRevision, state.domRevision)
+      || this.lastText !== state.currentText
+      || this.lastHtml !== state.currentHtml;
+    if (progressed) this.lastProgressAtValue = now;
+    this.observed = true;
+    this.lastDomRevision = state.domRevision;
+    this.lastText = state.currentText;
+    this.lastHtml = state.currentHtml;
     this.active = state.active;
     return this.active;
   }
@@ -1470,6 +1510,12 @@ export class ChatGptNativeTurnActivityTracker {
   /** Native activity has no inferred expiry; only explicit inactive evidence ends it. */
   deadline(): undefined {
     return undefined;
+  }
+
+  sinceLastProgress(now = Date.now()): number | undefined {
+    return this.lastProgressAtValue === undefined
+      ? undefined
+      : Math.max(0, now - this.lastProgressAtValue);
   }
 }
 
@@ -3257,6 +3303,7 @@ export class ChatGptBrowserWorker {
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    reactivationBudgetMs = CHATGPT_SEND_REACTIVATION_INNER_BUDGET_MS,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
@@ -3279,24 +3326,84 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
-    await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
-    const evidence = await this.waitForSubmissionAcceptedWithRecovery(
-      page,
-      baseline,
-      abortSignal,
-      externalProgress,
-      initialToolBatchRevision,
-      completionTracker,
-      recoverObservation,
-    );
+    const activateSend = async (button: Locator, focusComposer?: Locator): Promise<void> => {
+      if (focusComposer) {
+        await focusComposer.focus({ signal: abortSignal, timeout: 10_000 });
+      }
+      await submissionLifecycle?.onSendActivated?.();
+      await button.press("Enter", {
+        noWaitAfter: true,
+        signal: abortSignal,
+        // runStage owns the operation budget. A second Locator timeout would silently collapse the
+        // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
+        // submitted the message; semantic submission evidence below remains the authority.
+        timeout: 0,
+      });
+    };
+    await activateSend(sendButton);
+
+    const waitForEvidenceWithinBudget = async (
+      budgetMs: number,
+    ): Promise<ChatGptSubmissionEvidence | undefined> => {
+      const budgetAbort = new AbortController();
+      const signal = abortSignal
+        ? AbortSignal.any([abortSignal, budgetAbort.signal])
+        : budgetAbort.signal;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const acceptance = this.waitForSubmissionAcceptedWithRecovery(
+        page,
+        baseline,
+        signal,
+        externalProgress,
+        initialToolBatchRevision,
+        completionTracker,
+        recoverObservation,
+      );
+      try {
+        return await Promise.race([
+          acceptance,
+          new Promise<undefined>(resolveTimeout => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              budgetAbort.abort();
+              resolveTimeout(undefined);
+            }, budgetMs);
+          }),
+        ]);
+      } catch (error) {
+        if (timedOut && !abortSignal?.aborted) return undefined;
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (timedOut) void acceptance.catch(() => {});
+      }
+    };
+
+    let evidence = await waitForEvidenceWithinBudget(reactivationBudgetMs);
+    if (!evidence) {
+      // Re-check once at the ambiguity boundary: the bounded observer may have timed out just as
+      // ChatGPT committed the prompt. Only a proven absence permits the single re-activation.
+      evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
+    }
+    if (!evidence) {
+      await captureDiagnostic?.("send-reactivation");
+      const retryComposer = await this.activeComposer(page);
+      const retrySendButton = retryComposer
+        .locator("xpath=ancestor::form[1]")
+        .getByTestId("send-button");
+      await retrySendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
+      await activateSend(retrySendButton, retryComposer);
+      evidence = await this.waitForSubmissionAcceptedWithRecovery(
+        page,
+        baseline,
+        abortSignal,
+        externalProgress,
+        initialToolBatchRevision,
+        completionTracker,
+        recoverObservation,
+      );
+    }
     submissionLifecycle?.onSubmitted?.();
     return evidence;
   }
@@ -4618,7 +4725,7 @@ export class ChatGptBrowserWorker {
       let lastHeartbeat = 0;
       let finalText = "";
       let sawRunning = false;
-      let loggedCompletionWait = false;
+      let lastProgressDiagnosticAt: number | undefined;
       let capturedResponse = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
@@ -4868,14 +4975,41 @@ export class ChatGptBrowserWorker {
             }
             break;
           }
-          if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
-            loggedCompletionWait = true;
-            await diagnostics.capture(page, "response-stalled-30s");
+          const diagnosticNow = Date.now();
+          if (chatGptProgressDiagnosticDue(sentAt, lastProgressDiagnosticAt, diagnosticNow)) {
+            const firstProgressDiagnostic = lastProgressDiagnosticAt === undefined;
+            lastProgressDiagnosticAt = diagnosticNow;
+            const progress: ChatGptTurnProgress = {
+              runningDurationMs: diagnosticNow - sentAt,
+              ...(nativeActivityTracker.sinceLastProgress(diagnosticNow) !== undefined
+                ? { sinceLastVisibleProgressMs: nativeActivityTracker.sinceLastProgress(diagnosticNow) }
+                : {}),
+              ...(snapshot.domRevision !== undefined ? { domRevision: snapshot.domRevision } : {}),
+              textChars: snapshot.visibleText.length,
+              traceBlockCount: snapshot.traceBlocks.length,
+              completionActionVisible: snapshot.completionActionVisible,
+              nativeTurnIdentity: responseTurn.identity,
+            };
+            turn.onProgress?.(progress);
+            await diagnostics.capture(
+              page,
+              firstProgressDiagnostic
+                ? "response-stalled-30s"
+                : `response-progress-${Math.floor(progress.runningDurationMs / 60_000)}m`,
+            );
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
             console.warn(
-              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+              `[chatgpt-web] ${formatChatGptProgressStatus(progress)}`
+              + ` runningMs=${progress.runningDurationMs}`
+              + ` sinceLastProgressMs=${progress.sinceLastVisibleProgressMs ?? "unknown"}`
+              + ` domRevision=${progress.domRevision ?? "unknown"}`
+              + ` textChars=${progress.textChars}`
+              + ` traceBlocks=${progress.traceBlockCount}`
+              + ` completionActionVisible=${progress.completionActionVisible}`
+              + ` nativeTurnIdentity=${progress.nativeTurnIdentity}`
+              + ` running=${running}, sawRunning=${sawRunning}, ui=${diagnostic}`,
             );
           }
         } else {

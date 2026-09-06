@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
-import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import type { BrowserTurn, ChatGptTurnProgress, ResolvedBrowserConfig } from "./browser-worker";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -26,6 +26,7 @@ interface PendingTurn {
 type HelperMessage =
   | { type: "ready"; features?: string[] }
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "turn_progress"; progress: ChatGptTurnProgress }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
@@ -105,6 +106,17 @@ function parseHelperMessage(line: string): HelperMessage {
         checkpoint: parseChatGptLunaCheckpoint(message.checkpoint),
         answerHash: message.answerHash,
       };
+    }
+    if (event === "turn_progress") {
+      const progress = message.progress;
+      if (!progress || typeof progress !== "object" || Array.isArray(progress)
+        || !Number.isSafeInteger((progress as Record<string, unknown>).runningDurationMs)
+        || !Number.isSafeInteger((progress as Record<string, unknown>).textChars)
+        || !Number.isSafeInteger((progress as Record<string, unknown>).traceBlockCount)
+        || typeof (progress as Record<string, unknown>).completionActionVisible !== "boolean") {
+        throw new Error("Launcher browser helper progress event is invalid");
+      }
+      return { type: "event", id: message.id, event, progress: progress as ChatGptTurnProgress };
     }
     const text = message.text;
     const continuation = message.continuation;
@@ -408,6 +420,7 @@ export class LauncherBrowserHelperClient {
     if (!pending) return;
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      else if (message.event === "turn_progress") pending.turn.onProgress?.(message.progress);
       else if (message.event === "tool_batch_observed") {
         const progress = pending.turn.externalProgress;
         if (!progress) {

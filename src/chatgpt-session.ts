@@ -20,6 +20,7 @@ export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
+export const CHATGPT_EFFORT_CLEANUP_TIMEOUT_MS = 2_000;
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
@@ -90,10 +91,26 @@ async function waitForEffortSurface(
 }
 
 async function clearGhostEffortState(page: Page, control: Locator): Promise<void> {
-  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
-  const state = await control.getAttribute("data-state").catch(() => null);
-  if (expanded === "true" || state === "open") {
-    await page.keyboard.press("Escape").catch(() => {});
+  const portal = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true }).last();
+  const deadline = Date.now() + CHATGPT_EFFORT_CLEANUP_TIMEOUT_MS;
+  let escapeSent = false;
+  for (;;) {
+    const expanded = await control.getAttribute("aria-expanded").catch(() => null);
+    const state = await control.getAttribute("data-state").catch(() => null);
+    const portalVisible = await portal.isVisible().catch(() => false);
+    const open = expanded === "true" || state === "open";
+    if (!open && !portalVisible) return;
+    if (!escapeSent) {
+      escapeSent = true;
+      // Radix can leave its portal mounted after the trigger reports closed. The portal/focus
+      // surface is the state that can swallow the following composer Enter, so close and verify
+      // the actual surface rather than trusting trigger attributes alone.
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("ChatGPT effort picker remained open after Escape cleanup");
+    }
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 25));
   }
 }
 
@@ -103,10 +120,16 @@ export async function activateChatGptEffortMenu(
   options: { settleMs?: number } = {},
 ): Promise<ChatGptEffortActivation> {
   const openSurface = await visibleEffortSurface(page, control);
-  if (openSurface) return { method: "already-open", ...openSurface };
+  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
+  const state = await control.getAttribute("data-state").catch(() => null);
+  if (openSurface && (expanded === "true" || state === "open")) {
+    return { method: "already-open", ...openSurface };
+  }
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
+  const cleanedSurface = await visibleEffortSurface(page, control);
+  if (cleanedSurface) return { method: "already-open", ...cleanedSurface };
   await control.click({ force: true, timeout: Math.max(1, settleMs) });
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };

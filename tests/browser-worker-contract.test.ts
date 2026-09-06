@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, chatGptTurnObservationState, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, chatGptTurnObservationState, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptProgressDiagnosticDue, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -445,7 +445,7 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   const sendEnd = workerSource.indexOf("  private async waitForMultipartAcknowledgement(", sendStart);
   const recoverySource = workerSource.slice(recoveryStart, sendStart);
   const sendSource = workerSource.slice(sendStart, sendEnd);
-  const sendActivation = sendSource.indexOf('await sendButton.press("Enter"');
+  const sendActivation = sendSource.indexOf('await button.press("Enter"');
   const acceptance = sendSource.indexOf("await this.waitForSubmissionAcceptedWithRecovery(", sendActivation);
   const recovery = recoverySource.indexOf("await recoverObservation(");
 
@@ -453,7 +453,7 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   expect(sendActivation).toBeGreaterThan(-1);
   expect(acceptance).toBeGreaterThan(sendActivation);
   expect(recovery).toBeGreaterThan(-1);
-  const sendPressCall = 'sendButton.press("Enter"';
+  const sendPressCall = 'button.press("Enter"';
   expect(sendSource.indexOf(sendPressCall, sendActivation + sendPressCall.length)).toBe(-1);
   expect(recoverySource).toContain(
     "if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error",
@@ -691,6 +691,89 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   )).resolves.toBe("user_turn");
   expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("ambiguous send gets exactly one bounded reactivation before the outer guard", { timeout: 10_000 }, async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://send-reactivation-${Date.now()}-${Math.random()}`,
+    chatgptWeb: {
+      localToolsEnabled: false,
+      solAvailable: true,
+      proAvailable: true,
+      storageStatePath: `/tmp/send-reactivation-${Date.now()}-${Math.random()}.json`,
+    },
+  };
+  type Worker = {
+    runStage<T>(traceId: string, stage: string, timeoutMs: number, action: (signal: AbortSignal) => Promise<T>): Promise<T>;
+    activeComposer(page: Page): Promise<unknown>;
+    currentSubmissionEvidence(page: Page, baseline: unknown, signal?: AbortSignal): Promise<undefined>;
+    waitForSubmissionAcceptedWithRecovery(
+      page: Page,
+      baseline: unknown,
+      signal?: AbortSignal,
+    ): Promise<string>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+      progress?: unknown,
+      lifecycle?: { onSendActivated(): Promise<void>; onSubmitted(): void },
+      tracker?: unknown,
+      recover?: unknown,
+      reactivationBudgetMs?: number,
+    ): Promise<string>;
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as Worker;
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    getByText() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: () => hiddenLocator,
+  } as unknown as Page;
+  let sendPresses = 0;
+  let focusCalls = 0;
+  let acceptanceWaits = 0;
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async () => { sendPresses += 1; },
+  };
+  const composer = {
+    focus: async () => { focusCalls += 1; },
+    locator: () => ({ getByTestId: () => sendButton }),
+  };
+  worker.activeComposer = async () => composer;
+  worker.currentSubmissionEvidence = async () => undefined;
+  worker.waitForSubmissionAcceptedWithRecovery = async (_page, _baseline, signal) => {
+    acceptanceWaits += 1;
+    if (acceptanceWaits === 1) {
+      return await new Promise<string>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("bounded", "AbortError")), { once: true });
+      });
+    }
+    return "user_turn";
+  };
+  const lifecycle: string[] = [];
+
+  await expect(worker.runStage(
+    "send-reactivation",
+    "send",
+    7_000,
+    signal => worker.sendAttachedPrompt(page, {}, undefined, signal, undefined, {
+      onSendActivated: async () => { lifecycle.push("activated"); },
+      onSubmitted: () => { lifecycle.push("submitted"); },
+    }, undefined, undefined, 1),
+  )).resolves.toBe("user_turn");
+  expect(sendPresses).toBe(2);
+  expect(focusCalls).toBe(1);
+  expect(acceptanceWaits).toBe(2);
+  expect(lifecycle).toEqual(["activated", "activated", "submitted"]);
 });
 
 test("submission observation recovery resumes with rebound locators and is strictly bounded", async () => {
@@ -3267,9 +3350,38 @@ test("browser-native activity survives arbitrary DOM silence until explicit inac
   expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 1_000)).toBeTrue();
   // A long native turn remains live while the same owned stop/status surface stays affirmative.
   expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 40 * 60_000)).toBeTrue();
+  expect(tracker.sinceLastProgress(40 * 60_000)).toBe(40 * 60_000 - 1_000);
   expect(tracker.deadline()).toBeUndefined();
   expect(tracker.update({ active: false, domRevision: "response:1", currentText: "Searching" }, 40 * 60_000 + 1)).toBeFalse();
   expect(tracker.deadline()).toBeUndefined();
+});
+
+test("native DOM, text, and HTML progress reset the advisory progress age", () => {
+  const tracker = new ChatGptNativeTurnActivityTracker();
+  tracker.update({ active: true, domRevision: "response:1", currentText: "Searching", currentHtml: "<p>Searching</p>" }, 1_000);
+  expect(tracker.sinceLastProgress(10_000)).toBe(9_000);
+  tracker.update({ active: true, domRevision: "response:1", currentText: "Searching more", currentHtml: "<p>Searching more</p>" }, 11_000);
+  expect(tracker.sinceLastProgress(11_001)).toBe(1);
+  tracker.update({ active: true, domRevision: "response:2", currentText: "Searching more", currentHtml: "<p>Searching more</p>" }, 20_000);
+  expect(tracker.sinceLastProgress(20_001)).toBe(1);
+  expect(tracker.isLive(40 * 60_000)).toBeTrue();
+  expect(tracker.deadline()).toBeUndefined();
+});
+
+test("periodic progress diagnostics continue through a simulated 40-minute turn", () => {
+  const sentAt = 0;
+  let lastDiagnosticAt: number | undefined;
+  const diagnosticTimes: number[] = [];
+  for (let now = 0; now <= 40 * 60_000; now += 30_000) {
+    if (chatGptProgressDiagnosticDue(sentAt, lastDiagnosticAt, now)) {
+      diagnosticTimes.push(now);
+      lastDiagnosticAt = now;
+    }
+  }
+  expect(diagnosticTimes[0]).toBe(30_000);
+  expect(diagnosticTimes.length).toBeGreaterThanOrEqual(20);
+  expect(diagnosticTimes.at(-1)).toBe(38 * 60_000 + 30_000);
+  expect(lastDiagnosticAt).toBeGreaterThan(38 * 60_000);
 });
 
 test("browser-native activity vetoes DOM-health and completion conclusions while live", () => {

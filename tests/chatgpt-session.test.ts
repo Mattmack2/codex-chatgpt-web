@@ -111,6 +111,53 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   ]);
 });
 
+test("effort cleanup closes a residual portal even when the control reports closed", async () => {
+  let portalVisible = true;
+  let pointerOpened = false;
+  const events: string[] = [];
+  const portal = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => portalVisible,
+  };
+  const ownedMenu = { isVisible: async () => pointerOpened };
+  const hiddenSurface = {
+    filter() { return this; },
+    last() { return this; },
+    locator() { return this; },
+    isVisible: async () => false,
+  };
+  const control = {
+    getAttribute: async (name: string) => {
+      if (name === "aria-controls") return pointerOpened ? "radix-effort-menu" : null;
+      return name === "aria-expanded" ? "false" : name === "data-state" ? "closed" : null;
+    },
+    click: async () => { events.push("click"); },
+    dispatchEvent: async () => {
+      events.push("pointerdown");
+      pointerOpened = true;
+    },
+  };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === CHATGPT_EFFORT_MENU_SELECTOR) return portal;
+      if (selector === '[id="radix-effort-menu"]') return ownedMenu;
+      return hiddenSurface;
+    },
+    keyboard: {
+      press: async (key: string) => {
+        events.push(key);
+        portalVisible = false;
+      },
+    },
+  };
+
+  const activation = await activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 });
+  expect(activation.method).toBe("pointerdown");
+  expect(portalVisible).toBeFalse();
+  expect(events).toEqual(["Escape", "click", "pointerdown"]);
+});
+
 test("effort activation fails closed when neither event exposes a structural surface", async () => {
   const hiddenSurface = {
     filter() { return this; },

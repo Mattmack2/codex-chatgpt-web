@@ -21,7 +21,7 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserWorker, formatChatGptProgressStatus } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -689,6 +689,7 @@ export function createChatGptWebAdapter(
         ...multipartProgressLifecycle,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
+        onProgress: progress => trace.push({ kind: "commentary", text: formatChatGptProgressStatus(progress) }),
         onTextDelta: delta => text.push(delta),
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
@@ -753,6 +754,7 @@ export function createChatGptWebAdapter(
       ...multipartProgressLifecycle,
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
+      onProgress: progress => trace.push({ kind: "commentary", text: formatChatGptProgressStatus(progress) }),
       onTextDelta: delta => text.push(delta),
       externalProgress,
       completionFence: {

@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
-import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
+import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn, type ChatGptTurnProgress } from "./browser-worker";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
@@ -251,6 +251,12 @@ async function run(message: RunMessage): Promise<void> {
       },
     } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onProgress: (progress: ChatGptTurnProgress) => writeProtocol({
+      type: "event",
+      id: message.id,
+      event: "turn_progress",
+      progress,
+    }),
     onPreparedSelected: reused => {
       if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
         throw new Error("Browser helper could not request prompt selection");
