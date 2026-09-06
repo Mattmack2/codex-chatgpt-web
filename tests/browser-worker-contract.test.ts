@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, chatGptTurnObservationState, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -423,6 +423,19 @@ test("a stalled DOM observation fails within its probe budget", async () => {
     "if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause",
   );
   expect(runBrowserTurn.slice(recovery)).toContain("responseTurn.identity");
+});
+
+test("post-submit observation grace is never an implicit turn deadline", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const postSubmit = workerSource.slice(workerSource.indexOf("  private async waitForNewAssistantTurn("));
+
+  // The 60s/180s values remain observation-policy inputs for external progress, while the only
+  // absolute post-submit deadline is the explicitly configured `turnTimeoutMs` value.
+  expect(postSubmit).not.toContain("responseDeadline");
+  expect(postSubmit).not.toContain("nativeActivityDeadline");
+  expect(postSubmit).not.toContain("did not expose its assistant turn in the DOM");
+  expect(workerSource).not.toContain("stopped generating but did not expose its completed-turn action");
+  expect(workerSource).toContain("deadline !== undefined && Date.now() >= deadline");
 });
 
 test("a submission probe stall rebinds the same tab without sending the prompt twice", () => {
@@ -3196,18 +3209,19 @@ test("trace parsing removes an Answer now control appended to live reasoning", (
   });
 });
 
-test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {
-  const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
+test("browser DOM observation never infers death from elapsed silence", () => {
+  const missing = new ChatGptTurnDomHealthTracker();
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
   expect(missing.update(absent, 1_000)).toBeUndefined();
-  expect(missing.update(absent, 2_000)).toContain("did not create a response DOM");
+  expect(missing.observationState()).toBe("OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM");
+  expect(missing.update(absent, 40 * 60_000)).toBeUndefined();
 
-  const empty = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const empty = new ChatGptTurnDomHealthTracker();
   const terminal = {
     ...absent,
     responsePresent: true,
@@ -3215,35 +3229,37 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
     completionActionVisible: true,
   };
   expect(empty.update(terminal, 1_000)).toBeUndefined();
-  expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
+  expect(empty.observationState()).toBe("TURN_IS_AWAITING_TERMINAL_EVIDENCE");
+  expect(empty.update(terminal, 40 * 60_000)).toBeUndefined();
 
-  const missingCompletionAction = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const missingCompletionAction = new ChatGptTurnDomHealthTracker();
   const completedWithoutMarker = {
     ...terminal,
     currentText: "complete answer",
     completionActionVisible: false,
   };
   expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
-  expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
-  expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+  expect(missingCompletionAction.update(completedWithoutMarker, 40 * 60_000)).toBeUndefined();
+
+  const dead = new ChatGptTurnDomHealthTracker();
+  expect(dead.update({ ...terminal, terminalEvidence: "explicit ChatGPT terminal error" }, 1_000))
+    .toContain("explicit ChatGPT terminal error");
+  expect(dead.observationState()).toBe("TURN_IS_PROVABLY_DEAD");
 });
 
-test("browser-native activity survives bounded DOM transitions but not stale silence", () => {
-  expect(CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
-  const tracker = new ChatGptNativeTurnActivityTracker(1_000);
+test("browser-native activity survives arbitrary DOM silence until explicit inactivity", () => {
+  const tracker = new ChatGptNativeTurnActivityTracker();
 
   expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 1_000)).toBeTrue();
-  // A long native turn remains live while the same activity surface is within the silence bound.
-  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 1_999)).toBeTrue();
-  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 2_000)).toBeFalse();
-  // A new DOM revision starts a fresh bounded window for this same turn.
-  expect(tracker.update({ active: true, domRevision: "response:2", currentText: "Searching 2" }, 3_000)).toBeTrue();
-  expect(tracker.update({ active: false, domRevision: "response:2", currentText: "Searching 2" }, 3_001)).toBeFalse();
+  // A long native turn remains live while the same owned stop/status surface stays affirmative.
+  expect(tracker.update({ active: true, domRevision: "response:1", currentText: "Searching" }, 40 * 60_000)).toBeTrue();
+  expect(tracker.deadline()).toBeUndefined();
+  expect(tracker.update({ active: false, domRevision: "response:1", currentText: "Searching" }, 40 * 60_000 + 1)).toBeFalse();
   expect(tracker.deadline()).toBeUndefined();
 });
 
 test("browser-native activity vetoes DOM-health and completion conclusions while live", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const health = new ChatGptTurnDomHealthTracker();
   const stalled = {
     responsePresent: true,
     running: false,
@@ -3308,7 +3324,7 @@ test("browser send accepts only conclusive ChatGPT submission evidence", () => {
 });
 
 test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const health = new ChatGptTurnDomHealthTracker();
   const reasoning = {
     responsePresent: true,
     running: false,
@@ -3319,8 +3335,8 @@ test("visible reasoning keeps the browser turn healthy before final assistant ma
   expect(health.update(reasoning, 10_000)).toBeUndefined();
 });
 
-test("suspending DOM health for proven MCP progress restarts the missing-response window", () => {
-  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+test("proven MCP progress classifies missing response DOM as active", () => {
+  const tracker = new ChatGptTurnDomHealthTracker();
   const absent = {
     responsePresent: false,
     running: true,
@@ -3328,33 +3344,26 @@ test("suspending DOM health for proven MCP progress restarts the missing-respons
     completionActionVisible: false,
   };
 
-  // The response DOM is unavailable from the first observation, so the window opens here.
+  // The response DOM is unavailable, but the native tool call is affirmative activity.
   expect(tracker.update(absent, 1_000)).toBeUndefined();
-
-  // Proven tool-call activity suspends the check. Charging that suspended stretch against the
-  // grace period is what let a live turn be cancelled the moment liveness lapsed.
-  tracker.clearMissingResponse();
-
-  expect(tracker.update(absent, 10_000)).toBeUndefined();
-  expect(tracker.update(absent, 10_999)).toBeUndefined();
-  expect(tracker.update(absent, 11_000)).toContain("did not create a response DOM");
+  expect(tracker.observationState()).toBe("TURN_IS_STILL_ACTIVE");
+  expect(tracker.update(absent, 40 * 60_000)).toBeUndefined();
 });
 
-test("clearing the missing-response window preserves whether a response was ever observed", () => {
-  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+test("a temporarily detached response remains an observation state", () => {
+  const tracker = new ChatGptTurnDomHealthTracker();
   const present = {
     responsePresent: true,
     running: true,
     currentText: "partial",
     completionActionVisible: false,
   };
-  const absent = { ...present, responsePresent: false, currentText: "" };
+  const absent = { ...present, responsePresent: false, running: false, currentText: "" };
 
   expect(tracker.update(present, 1_000)).toBeUndefined();
   expect(tracker.update(absent, 1_500)).toBeUndefined();
-  tracker.clearMissingResponse();
-  expect(tracker.update(absent, 5_000)).toBeUndefined();
-  expect(tracker.update(absent, 6_000)).toContain("response DOM disappeared");
+  expect(tracker.observationState()).toBe("OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM");
+  expect(tracker.update(absent, 40 * 60_000)).toBeUndefined();
 });
 
 test("the launcher helper transport carries MCP progress into the out-of-process browser worker", () => {
@@ -3371,18 +3380,19 @@ test("the launcher helper transport carries MCP progress into the out-of-process
   expect(helper).toMatch(/externalProgress: progress/);
 });
 
-test("turn cancellation heuristics defer to proven MCP progress in both wait loops", () => {
+test("turn observation state is shared by both browser wait loops", () => {
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
   // A stale "Stopped thinking" label must not cancel a turn that is still driving tool calls, and
-  // the multipart staging loop must not be the one place that skips the liveness guard.
+  // the multipart staging loop must use the same non-terminal DOM observation contract.
   expect((worker.match(/stoppedThinkingTracker\.clear\(\)/g) ?? []).length).toBe(2);
-  expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
+  expect(worker).toContain("chatGptTurnObservationState");
+  expect(worker).not.toContain("domHealthTracker.clearMissingResponse");
 });
 
 test("proven MCP progress vetoes every terminal DOM conclusion, not just a missing response", () => {
   // Tool activity remains authoritative when the response DOM is present but its completion action
   // has not appeared yet.
-  const stalled = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const stalled = new ChatGptTurnDomHealthTracker();
   const answeredWithoutCompletionAction = {
     responsePresent: true,
     running: false,
@@ -3393,12 +3403,11 @@ test("proven MCP progress vetoes every terminal DOM conclusion, not just a missi
   expect(stalled.update({ ...answeredWithoutCompletionAction, externalProgressLive: true }, 1_000)).toBeUndefined();
   expect(stalled.update({ ...answeredWithoutCompletionAction, externalProgressLive: true }, 10_000)).toBeUndefined();
 
-  // Once the model genuinely stops, the window starts fresh rather than charging the live stretch.
+  // Once the model stops exposing native activity, missing completion evidence is still ambiguous.
   expect(stalled.update(answeredWithoutCompletionAction, 10_100)).toBeUndefined();
-  expect(stalled.update(answeredWithoutCompletionAction, 10_849)).toBeUndefined();
-  expect(stalled.update(answeredWithoutCompletionAction, 10_850)).toContain("did not expose its completed-turn action");
+  expect(stalled.update(answeredWithoutCompletionAction, 40 * 60_000)).toBeUndefined();
 
-  const empty = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const empty = new ChatGptTurnDomHealthTracker();
   const completedEmpty = {
     responsePresent: true,
     running: false,
@@ -3408,14 +3417,14 @@ test("proven MCP progress vetoes every terminal DOM conclusion, not just a missi
   expect(empty.update({ ...completedEmpty, externalProgressLive: true }, 1_000)).toBeUndefined();
   expect(empty.update({ ...completedEmpty, externalProgressLive: true }, 9_000)).toBeUndefined();
   expect(empty.update(completedEmpty, 9_100)).toBeUndefined();
-  expect(empty.update(completedEmpty, 9_600)).toContain("completed without a final answer");
+  expect(empty.update(completedEmpty, 40 * 60_000)).toBeUndefined();
 });
 
 test("live external progress still records that a response DOM was observed", () => {
-  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const tracker = new ChatGptTurnDomHealthTracker();
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -3428,9 +3437,10 @@ test("live external progress still records that a response DOM was observed", ()
     externalProgressLive: true,
   }, 1_000)).toBeUndefined();
 
-  // The turn is reported as vanished rather than never created, so `sawResponse` survived.
+  // Losing the response subtree remains an observer state even after a response was visible.
   expect(tracker.update(absent, 2_000)).toBeUndefined();
-  expect(tracker.update(absent, 3_000)).toContain("response DOM disappeared");
+  expect(tracker.observationState()).toBe("OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM");
+  expect(tracker.update(absent, 40 * 60_000)).toBeUndefined();
 });
 
 test("an accepted turn survives internal observation faults instead of being torn down", () => {
@@ -3488,6 +3498,24 @@ test("stale MCP progress stops suppressing DOM health without penalising long ac
     { revision: 0, lastToolBatchRevision: 0, activeToolCalls: 0 },
     1_000,
   )).toBeFalse();
+
+  // Multipart uses a wider observation grace, but that wider value is still only a liveness
+  // observation window and never a total turn deadline.
+  const recent = {
+    revision: 1,
+    lastToolBatchRevision: 0,
+    activeToolCalls: 0,
+    lastProgressAt: 1_000,
+  };
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    recent,
+    1_000 + CHATGPT_RESPONSE_DOM_GRACE_MS,
+  )).toBeFalse();
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    recent,
+    1_000 + 180_000 - 1,
+    180_000,
+  )).toBeTrue();
 });
 
 test("the daemon prefers the browser helper that shipped beside its own entrypoint", () => {
@@ -3684,8 +3712,8 @@ test("Full mode has no fixed post-tool final-answer deadline", () => {
   }, 3_100 + CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
 });
 
-test("Full mode fails closed when ChatGPT exposes completion without a post-tool final answer", () => {
-  const tracker = new ChatGptCompletionTracker(500, 1_000);
+test("Full mode waits when ChatGPT exposes no post-tool final answer", () => {
+  const tracker = new ChatGptCompletionTracker(500);
   const partialLookingFinal = {
     responsePresent: true,
     running: false,
@@ -3698,8 +3726,9 @@ test("Full mode fails closed when ChatGPT exposes completion without a post-tool
   expect(tracker.update(partialLookingFinal, 1_000)).toBeFalse();
   // Citation/markup hydration is not a new final answer and cannot release the boundary.
   expect(tracker.update({ ...partialLookingFinal, currentHtml: '<p data-hydrated="true">partial answer</p>' }, 1_999)).toBeFalse();
-  expect(() => tracker.update(partialLookingFinal, 2_000))
-    .toThrow("completed without producing a final answer after its last Codex tool call");
+  // Even an arbitrarily long unchanged projection is not terminal evidence. The turn remains
+  // pending until a new answer projection or an explicit ChatGPT terminal signal appears.
+  expect(tracker.update(partialLookingFinal, 40 * 60_000)).toBeFalse();
 });
 
 test("a future progress timestamp is not treated as liveness", () => {

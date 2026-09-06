@@ -115,18 +115,8 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
  * the bounded staged-send budget.
  */
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
-export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
-export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
-/**
- * How long a browser-native activity signal may remain unchanged before it
- * stops suppressing DOM-health conclusions.  This is a silence ceiling, not a
- * turn timeout: a long native connector turn may keep extending it when the
- * browser reports a new DOM/text revision, while a stale stop/status surface
- * cannot keep an accepted turn alive forever.
- */
-export const CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS = 10 * 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
@@ -1333,12 +1323,8 @@ export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
   private lastToolBatchRevision = 0;
   private postToolAnswerBaselineText?: string;
-  private missingPostToolAnswerSince?: number;
 
-  constructor(
-    private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS,
-    private readonly missingPostToolAnswerMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
-  ) {}
+  constructor(private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS) {}
 
   needsToolBatchObservation(revision: number): boolean {
     if (!Number.isSafeInteger(revision) || revision < this.lastToolBatchRevision) {
@@ -1353,7 +1339,6 @@ export class ChatGptCompletionTracker {
     // harness therefore cannot execute the tool until this exact pre-tool answer boundary exists.
     this.postToolAnswerBaselineText = currentText;
     this.lastToolBatchRevision = revision;
-    this.missingPostToolAnswerSince = undefined;
     this.candidate = undefined;
     return true;
   }
@@ -1371,22 +1356,16 @@ export class ChatGptCompletionTracker {
     // while its own tool calls were still in flight.
     if (state.externalToolCallsInFlight || state.nativeActivityInFlight) {
       this.candidate = undefined;
-      this.missingPostToolAnswerSince = undefined;
       return false;
     }
     if (this.postToolAnswerBaselineText === state.currentText) {
       this.candidate = undefined;
-      if (!chatGptTurnIsComplete(state)) {
-        this.missingPostToolAnswerSince = undefined;
-        return false;
-      }
-      this.missingPostToolAnswerSince ??= now;
-      if (now - this.missingPostToolAnswerSince >= this.missingPostToolAnswerMs) {
-        throw new Error("ChatGPT completed without producing a final answer after its last Codex tool call");
-      }
+      // The unchanged post-tool projection is ambiguous: it may be a temporary renderer state or
+      // a model that is still preparing its final answer. It is not terminal evidence, regardless
+      // of how long it remains unchanged. A later answer revision must still appear before this
+      // completion fence can release the turn.
       return false;
     }
-    this.missingPostToolAnswerSince = undefined;
     if (!chatGptTurnIsComplete(state)) {
       this.candidate = undefined;
       return false;
@@ -1399,27 +1378,41 @@ export class ChatGptCompletionTracker {
   }
 }
 
+export type ChatGptTurnObservationState =
+  | "TURN_IS_STILL_ACTIVE"
+  | "OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM"
+  | "TURN_IS_AWAITING_TERMINAL_EVIDENCE"
+  | "TURN_IS_PROVABLY_DEAD";
+
+/**
+ * Classify what the browser observation proves at this instant.
+ *
+ * DOM absence or an unchanged response is an observation state, not a terminal state. The only
+ * terminal input accepted here is explicit evidence supplied by a caller that has already proved
+ * this exact turn cannot complete. Tab closure, cancellation, native ChatGPT error surfaces, and
+ * identity violations are checked by their dedicated guards before this classifier runs.
+ */
+export function chatGptTurnObservationState(state: {
+  responsePresent: boolean;
+  running: boolean;
+  completionActionVisible: boolean;
+  externalProgressLive?: boolean;
+  nativeActivityLive?: boolean;
+  terminalEvidence?: string;
+}): ChatGptTurnObservationState {
+  if (state.terminalEvidence) return "TURN_IS_PROVABLY_DEAD";
+  if (state.running || state.externalProgressLive || state.nativeActivityLive) {
+    return "TURN_IS_STILL_ACTIVE";
+  }
+  if (!state.responsePresent) return "OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM";
+  return "TURN_IS_AWAITING_TERMINAL_EVIDENCE";
+}
+
 export class ChatGptTurnDomHealthTracker {
-  private sawResponse = false;
-  private missingResponseSince?: number;
-  private emptyCompletionSince?: number;
-  private missingCompletionAction?: { text: string; since: number };
+  private lastState: ChatGptTurnObservationState = "OBSERVER_TEMPORARILY_CANNOT_SEE_RESPONSE_DOM";
 
-  constructor(
-    private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
-    private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
-    private readonly missingCompletionActionMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
-  ) {}
-
-  /**
-   * Clears only the missing-response window, leaving `sawResponse` history intact.
-   *
-   * Callers use this when proven external progress suspends DOM health checks: the suspended
-   * stretch must not be charged against the grace period, or the first observation after it
-   * resumes would fail instantly against a timestamp recorded long before.
-   */
-  clearMissingResponse(): void {
-    this.missingResponseSince = undefined;
+  observationState(): ChatGptTurnObservationState {
+    return this.lastState;
   }
 
   update(state: {
@@ -1429,80 +1422,28 @@ export class ChatGptTurnDomHealthTracker {
     completionActionVisible: boolean;
     externalProgressLive?: boolean;
     nativeActivityLive?: boolean;
+    terminalEvidence?: string;
   }, now = Date.now()): string | undefined {
-    if (state.responsePresent) this.sawResponse = true;
-    if (state.externalProgressLive || state.nativeActivityLive) {
-      // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
-      // is still completing, or a current browser-native activity surface that is still changing,
-      // disproves all of them, whatever the renderer is currently exposing, so no window may accrue
-      // while the model is provably working.
-      this.missingResponseSince = undefined;
-      this.emptyCompletionSince = undefined;
-      this.missingCompletionAction = undefined;
-      return undefined;
-    }
-    if (state.responsePresent) {
-      this.missingResponseSince = undefined;
-    } else {
-      this.missingResponseSince ??= now;
-      if (now - this.missingResponseSince >= this.missingResponseMs) {
-        return this.sawResponse
-          ? "ChatGPT response DOM disappeared while the browser turn was active"
-          : "ChatGPT did not create a response DOM after the message was sent";
-      }
-    }
-
-    const emptyCompletion = state.responsePresent
-      && !state.running
-      && state.currentText.length === 0
-      && state.completionActionVisible;
-    if (!emptyCompletion) {
-      this.emptyCompletionSince = undefined;
-    } else {
-      this.emptyCompletionSince ??= now;
-      if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
-        return "ChatGPT browser turn completed without a final answer";
-      }
-    }
-
-    const missingCompletionAction = state.responsePresent
-      && !state.running
-      && state.currentText.length > 0
-      && !state.completionActionVisible;
-    if (!missingCompletionAction) {
-      this.missingCompletionAction = undefined;
-    } else if (this.missingCompletionAction?.text !== state.currentText) {
-      this.missingCompletionAction = { text: state.currentText, since: now };
-    } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
-      return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
-    }
-    return undefined;
+    // Keep the timestamp argument for deterministic callers and API compatibility. Elapsed time
+    // alone is deliberately never a terminal signal for an accepted Browser Sol turn.
+    void now;
+    this.lastState = chatGptTurnObservationState(state);
+    return state.terminalEvidence;
   }
 }
 
 /**
- * Bounded liveness for ChatGPT-native connector/tool work.
+ * Affirmative liveness for ChatGPT-native connector/tool work.
  *
  * Browser-only turns do not have the Codex MCP progress channel.  They do have
  * browser-owned evidence: a visible generation stop state, an active status
  * surface, and mutation/text revisions from the same response/submission DOM.
- * The signal is accepted only for this tracker instance (one turn), and only
- * until the last observed revision has been silent for the ceiling above.
+ * The signal is accepted only for this tracker instance (one turn). It remains
+ * live until the same observation surface explicitly reports that the activity
+ * ended; elapsed silence is an observer condition, not proof that the turn died.
  */
 export class ChatGptNativeTurnActivityTracker {
   private active = false;
-  private lastActivityAt?: number;
-  private lastRevision?: string | number;
-  private lastText?: string;
-  private lastHtml?: string;
-
-  constructor(
-    private readonly stallCeilingMs = CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS,
-  ) {
-    if (!Number.isFinite(stallCeilingMs) || stallCeilingMs <= 0) {
-      throw new Error("ChatGPT native activity stall ceiling must be positive and finite");
-    }
-  }
 
   update(state: {
     active: boolean;
@@ -1510,34 +1451,25 @@ export class ChatGptNativeTurnActivityTracker {
     currentText?: string;
     currentHtml?: string;
   }, now = Date.now()): boolean {
-    const changed = !this.active
-      || state.domRevision !== this.lastRevision
-      || state.currentText !== this.lastText
-      || state.currentHtml !== this.lastHtml;
-    this.lastRevision = state.domRevision;
-    this.lastText = state.currentText;
-    this.lastHtml = state.currentHtml;
-    if (!state.active) {
-      this.active = false;
-      this.lastActivityAt = undefined;
-      return false;
-    }
-    this.active = true;
-    if (changed) this.lastActivityAt = now;
-    return this.isLive(now);
+    // Revisions/text/html remain part of the input because they are useful evidence to the caller,
+    // but they are not an age-based lease. A visible stop/status control is affirmative until the
+    // same turn reports it gone. This prevents a healthy 20–40 minute native turn from expiring
+    // merely because ChatGPT paused DOM mutations.
+    void state.domRevision;
+    void state.currentText;
+    void state.currentHtml;
+    void now;
+    this.active = state.active;
+    return this.active;
   }
 
-  isLive(now = Date.now()): boolean {
-    return this.active
-      && this.lastActivityAt !== undefined
-      && now - this.lastActivityAt < this.stallCeilingMs;
+  isLive(_now = Date.now()): boolean {
+    return this.active;
   }
 
-  /** The absolute time at which the last observed activity stops being evidence. */
-  deadline(): number | undefined {
-    return this.lastActivityAt === undefined
-      ? undefined
-      : this.lastActivityAt + this.stallCeilingMs;
+  /** Native activity has no inferred expiry; only explicit inactive evidence ends it. */
+  deadline(): undefined {
+    return undefined;
   }
 }
 
@@ -1569,8 +1501,9 @@ export const CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS = 5_000;
 export function chatGptExternalProgressSuppressesDomHealth(
   snapshot: ChatGptExternalTurnProgressSnapshot | undefined,
   now: number,
+  graceMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
 ): boolean {
-  if (!chatGptExternalProgressIsLive(snapshot, now, CHATGPT_RESPONSE_DOM_GRACE_MS)) return false;
+  if (!chatGptExternalProgressIsLive(snapshot, now, graceMs)) return false;
   const lastProgressAt = snapshot?.lastProgressAt;
   if (lastProgressAt === undefined) return false;
   const age = now - lastProgressAt;
@@ -2771,20 +2704,9 @@ export class ChatGptBrowserWorker {
     let observationBaseline = baseline;
     let recoveryAttempts = 0;
     const nativeActivityTracker = new ChatGptNativeTurnActivityTracker();
-    let responseDeadline = Math.min(
-      deadline ?? Number.POSITIVE_INFINITY,
-      Date.now() + graceMs,
-    );
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
-      let progress = externalProgress?.snapshot();
-      if (progress?.lastProgressAt !== undefined) {
-        responseDeadline = Math.min(
-          deadline ?? Number.POSITIVE_INFINITY,
-          Math.max(responseDeadline, progress.lastProgressAt + graceMs),
-        );
-      }
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
@@ -2798,34 +2720,25 @@ export class ChatGptBrowserWorker {
           signal,
         );
       } catch (error) {
-        const latestProgress = externalProgress?.snapshot();
-        if (error instanceof ChatGptBrowserObservationTimeoutError && recoverObservation) {
+        if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+        if (recoverObservation) {
           recoveryAttempts += 1;
-          if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-            throw new Error(
-              `ChatGPT accepted the message, but its DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-              { cause: error },
+          if (recoveryAttempts <= MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+            const recovered = await recoverObservation(
+              recoveryAttempts,
+              error,
+              observationBaseline,
+              signal,
             );
+            observationPage = recovered.page;
+            observationBaseline = recovered.baseline;
+            continue;
           }
-          const recovered = await recoverObservation(
-            recoveryAttempts,
-            error,
-            observationBaseline,
-            signal,
-          );
-          observationPage = recovered.page;
-          observationBaseline = recovered.baseline;
-          continue;
         }
-        const now = Date.now();
-        if (!chatGptExternalProgressIsLive(latestProgress, now, graceMs)
-          && !nativeActivityTracker.isLive(now)) throw error;
-        await this.waitForTurnDomOrExternalProgress(
-          observationPage,
-          latestProgress?.revision ?? 0,
-          externalProgress,
-          signal,
-        );
+        // A live page whose observation promise did not answer is an observer condition, not
+        // terminal evidence. Retry the same owned surface; explicit page/turn errors still escape
+        // immediately on the next iteration.
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
       recoveryAttempts = 0;
@@ -2834,21 +2747,11 @@ export class ChatGptBrowserWorker {
         active: state.visibleStopButtonCount > 0,
         domRevision: state.domRevision,
       }, now);
-      const nativeActivityDeadline = nativeActivityTracker.deadline();
-      if (nativeActivityDeadline !== undefined) {
-        responseDeadline = Math.min(
-          deadline ?? Number.POSITIVE_INFINITY,
-          Math.max(responseDeadline, nativeActivityDeadline),
-        );
-      }
       // A tool batch can arrive while the DOM probe is in flight. Read progress again before
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
       // despite this exact iteration having successfully observed the page.
-      progress = externalProgress?.snapshot();
-      const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(progress, now);
-      if (now >= responseDeadline && !externalProgressLive && !nativeActivityLive) {
-        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
-      }
+      let progress = externalProgress?.snapshot();
+      const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(progress, now, graceMs);
       const identity = chatGptNewTurnIdentity(
         observationBaseline.initialResponseTurnIdentities,
         state.responseIdentities,
@@ -3437,18 +3340,39 @@ export class ChatGptBrowserWorker {
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-      if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
-          abortSignal,
-        );
-        if (rebound.identity !== responseTurn.identity) {
-          responseTurn = rebound;
-          responseDomCache.key = undefined;
-          responseDomCache.snapshot = undefined;
-          snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+      if (!snapshot.responsePresent) {
+        let responseCount: number;
+        try {
+          responseCount = await withChatGptBrowserObservationTimeout(
+            withBrowserTurnAbort(responseTurn.locator.count(), abortSignal),
+          );
+        } catch (error) {
+          if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+          // A count/evaluate timeout means the observer is temporarily blind. Keep the owned
+          // multipart turn pending; page closure, cancellation, and explicit ChatGPT errors are
+          // checked above and remain terminal.
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          continue;
+        }
+        if (responseCount !== 1) {
+          try {
+            const rebound = await this.reconcileAssistantTurnBinding(
+              page,
+              submissionBaseline,
+              responseTurn,
+              abortSignal,
+            );
+            if (rebound.identity !== responseTurn.identity) {
+              responseTurn = rebound;
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
+            }
+          } catch (error) {
+            if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+            await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+            continue;
+          }
         }
       }
       const externalProgressSnapshot = externalProgress?.snapshot();
@@ -3473,7 +3397,6 @@ export class ChatGptBrowserWorker {
       if (!snapshot.responsePresent && externalProgressLive) {
         // Proven MCP activity outranks a momentarily unavailable staging DOM, exactly as it does
         // in the main turn loop.
-        domHealthTracker.clearMissingResponse();
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
@@ -4792,28 +4715,29 @@ export class ChatGptBrowserWorker {
               snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
             }
           } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
+            if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
             consecutiveObservationRebinds += 1;
-            if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-              throw new Error(
-                `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-                { cause: error },
-              );
+            if (launcherSurfaceId && consecutiveObservationRebinds <= MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+              await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
+              submissionBaseline = {
+                ...submissionBaseline,
+                userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+                responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+                domCache: {},
+              };
+              responseTurn = {
+                ...responseTurn,
+                locator: page.locator(`[data-testid=${JSON.stringify(responseTurn.identity)}]`),
+              };
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              await diagnostics.capture(page, "response-page-rebound");
+              continue;
             }
-            await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
-            submissionBaseline = {
-              ...submissionBaseline,
-              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
-              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
-              domCache: {},
-            };
-            responseTurn = {
-              ...responseTurn,
-              locator: page.locator(`[data-testid=${JSON.stringify(responseTurn.identity)}]`),
-            };
-            responseDomCache.key = undefined;
-            responseDomCache.snapshot = undefined;
-            await diagnostics.capture(page, "response-page-rebound");
+            // Repeated observation timeouts with a still-owned page are still observer blindness,
+            // not proof that this exact accepted turn is dead. Retry the same binding until an
+            // explicit terminal signal, page closure, cancellation, or configured deadline occurs.
+            await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
             continue;
           }
         }
@@ -4822,8 +4746,9 @@ export class ChatGptBrowserWorker {
         // this iteration goes on to `continue` for a rebind, confirmation, or liveness pause.
         internalObservationFaults = 0;
         observedThisIteration = true;
-        // Liveness may postpone a verdict, never waive it: once activity goes stale the DOM alone
-        // decides, so a tool call that never returns cannot hold a turn with no explicit deadline open forever.
+        // External progress can suppress DOM-health interpretation, but neither it nor DOM
+        // silence is a completion/death verdict. Only explicit terminal evidence below may end a
+        // turn that has no configured absolute deadline.
         const externalProgressSnapshot = turn.externalProgress?.snapshot();
         if (turn.externalProgress
           && externalProgressSnapshot
@@ -4863,7 +4788,6 @@ export class ChatGptBrowserWorker {
           // Current-turn native or MCP activity proves that ChatGPT is still executing even if its
           // renderer temporarily cannot expose the response subtree. DOM remains authoritative for
           // text and completion; this only prevents a live turn from being misclassified as vanished.
-          domHealthTracker.clearMissingResponse();
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
