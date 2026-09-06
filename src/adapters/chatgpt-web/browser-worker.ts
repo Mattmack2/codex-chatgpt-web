@@ -2773,12 +2773,6 @@ export class ChatGptBrowserWorker {
         locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
         acceptedUserTurnIdentities: state.userIdentities,
       };
-      // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
-      // observation can prove it is still missing; the explicit turn deadline remains above.
-      if (Date.now() >= responseDeadline
-        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
-        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
-      }
       await this.waitForTurnDomOrExternalProgress(
         observationPage,
         progress?.revision ?? 0,
@@ -3318,12 +3312,9 @@ export class ChatGptBrowserWorker {
     completionTracker = new ChatGptCompletionTracker(),
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
-    // ingests the attached context. The ordinary 60-second missing-response verdict would cut the
-    // dedicated multipart acknowledgement budget back down after that transient shell appears.
-    // Keep DOM absence bounded by the same per-stage budget that owns this protocol step.
-    const domHealthTracker = new ChatGptTurnDomHealthTracker(
-      CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
-    );
+    // ingests the attached context. The multipart grace remains an observation-policy input for
+    // progress, never a wall-clock death verdict for the owned turn.
+    const domHealthTracker = new ChatGptTurnDomHealthTracker();
     const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
     const responseDomCache: ChatGptResponseDomCache = {};
     let responseTurn = initialResponseTurn;

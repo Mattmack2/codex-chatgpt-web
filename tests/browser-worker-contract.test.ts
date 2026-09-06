@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_NATIVE_ACTIVITY_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, chatGptTurnObservationState, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptNativeTurnActivityTracker, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, chatGptTurnObservationState, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -475,9 +475,9 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"submission-page-rebound"');
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"assistant-page-rebound"');
   expect(runBrowserTurn).toContain(
-    "const toolTurnObservationRecovery = turn.externalProgress !== undefined || launcherSurfaceId !== undefined;",
+    "const launcherObservationRecovery = launcherSurfaceId !== undefined",
   );
-  expect((runBrowserTurn.match(/toolTurnObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
+  expect((runBrowserTurn.match(/launcherObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
   expect(runBrowserTurn).toContain("stageBaseline = recovered.baseline");
   expect(runBrowserTurn).toContain("submissionBaseline = recovered.baseline");
   expect((runBrowserTurn.match(/recoverAssistantObservation\(\.\.\.args\)/g) ?? []).length).toBe(2);
@@ -865,7 +865,7 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   }
 });
 
-test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
+test("missing-assistant observation waits past the grace until cancellation or an explicit deadline", async () => {
   type Baseline = { initialResponseTurnIdentities: string[]; domCache: Record<string, unknown> };
   type State = { userIdentities: string[]; responseIdentities: string[] };
   const hiddenLocator = {
@@ -883,16 +883,22 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
     for (const scenario of ["appeared", "missing", "turn-deadline"] as const) {
       let now = 1_000;
       Date.now = () => now;
+      const abortController = new AbortController();
       const worker = ChatGptBrowserWorker.forProvider({
         adapter: "chatgpt-web",
         baseUrl: `browser://assistant-expiry-${scenario}-${Math.random()}`,
         chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
       }) as unknown as {
-        waitForNewAssistantTurn(page: Page, baseline: Baseline, deadline: number | undefined): Promise<{
+        waitForNewAssistantTurn(page: Page, baseline: Baseline, deadline: number | undefined, signal?: AbortSignal): Promise<{
           identity: string; locator: unknown;
         }>;
         submissionDomState(): Promise<State>;
-        waitForTurnDomOrExternalProgress(): Promise<void>;
+        waitForTurnDomOrExternalProgress(
+          page: Page,
+          revision: number,
+          progress: unknown,
+          signal?: AbortSignal,
+        ): Promise<void>;
       };
       let observations = 0;
       let waits = 0;
@@ -904,24 +910,32 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         };
       };
       worker.waitForTurnDomOrExternalProgress = async () => {
-        if (++waits > 1) throw new Error("missing response was allowed to wait past its grace");
-        // Renderer or scheduler resumes after the response grace with a newly rendered turn.
-        now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
+        waits += 1;
+        // A healthy browser can remain quiet for tens of minutes. The observer must keep waiting
+        // until a turn-specific terminal signal arrives, rather than converting this elapsed time
+        // into a death verdict.
+        now += 40 * 60_000;
+        if (scenario === "missing" && waits === 2) abortController.abort();
       };
       const result = worker.waitForNewAssistantTurn(
         page,
         { initialResponseTurnIdentities: [], domCache: {} },
         scenario === "turn-deadline" ? now + CHATGPT_RESPONSE_DOM_GRACE_MS : undefined,
+        scenario === "missing" ? abortController.signal : undefined,
       );
       if (scenario === "appeared") {
         await expect(result).resolves.toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
+        expect(observations).toBe(2);
+        expect(waits).toBe(1);
+      } else if (scenario === "missing") {
+        await expect(result).rejects.toThrow("ChatGPT web turn aborted");
+        expect(observations).toBe(2);
+        expect(waits).toBe(2);
       } else {
-        await expect(result).rejects.toThrow(scenario === "missing"
-          ? "ChatGPT accepted the message but did not expose its assistant turn in the DOM"
-          : "ChatGPT web turn timed out");
+        await expect(result).rejects.toThrow("ChatGPT web turn timed out");
+        expect(observations).toBe(1);
+        expect(waits).toBe(1);
       }
-      expect(observations).toBe(scenario === "turn-deadline" ? 1 : 2);
-      expect(waits).toBe(1);
     }
   } finally {
     Date.now = realDateNow;
