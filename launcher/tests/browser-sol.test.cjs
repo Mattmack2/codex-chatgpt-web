@@ -84,6 +84,12 @@ test("Any-Clerk settlement authority is accepted only for the current zero-work 
   const active = readWakeSource(sourcePath, projectKey);
   assert.equal(active.settlementId, null);
   assert.equal(active.unfinished, 1);
+
+  document.projects[projectKey].provider_count = 0;
+  document.projects[projectKey].settlement_id = "";
+  fs.writeFileSync(sourcePath, JSON.stringify(document));
+  const quiescentWithoutSettlement = readWakeSource(sourcePath, projectKey);
+  assert.equal(quiescentWithoutSettlement.settlementId, null);
 });
 
 test("workspace registry persists identity and automation metadata without provider history", () => {
@@ -221,3 +227,35 @@ test("workspace manager delivers a settlement exactly once and serializes manual
   manager.stop();
 });
 
+test("workspace manager waits for the authoritative project settlement instead of worker-count transitions", async () => {
+  const directory = tempDirectory();
+  const projectKey = "project:github.com/example/project";
+  const store = new BrowserSolWorkspaceStore({
+    filePath: path.join(directory, "workspaces.json"),
+    defaultWorkspace: { projectKey, displayName: "Example", cwd: directory, automationEnabled: true },
+  });
+  let source = sourceRecord(projectKey, null, { providerCount: 2 });
+  const deliveries = [];
+  const manager = new BrowserSolWorkspaceManager({
+    store,
+    sourcePath: "/tmp/source.json",
+    pollIntervalMs: 0,
+    readSource: () => source,
+    taskFactory: () => ({
+      snapshot: () => ({ status: "idle", threadReady: true, lastError: null }),
+      setWorkspace() {},
+      async refreshActivity() {},
+      async sendWake() { deliveries.push("wake"); return { status: "delivered" }; },
+      close() {},
+    }),
+  });
+  await manager.start();
+  source = sourceRecord(projectKey, null, { providerCount: 1 });
+  await manager.tick();
+  assert.deepEqual(deliveries, []);
+  source = sourceRecord(projectKey, "wave:complete", { providerCount: 0 });
+  await manager.tick();
+  await manager.tick();
+  assert.deepEqual(deliveries, ["wake"]);
+  manager.stop();
+});

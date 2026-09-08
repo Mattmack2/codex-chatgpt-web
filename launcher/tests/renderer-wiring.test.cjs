@@ -24,6 +24,18 @@ test("native clicks reach browser tabs instead of the window drag region", () =>
   assert.match(appSource, /className="browser-tab-drag draggable"/);
 });
 
+test("Browser Sol workspaces use one owner-backed queue and keep infrastructure details out of normal UI", () => {
+  assert.match(preloadSource, /browserSolSelect:[\s\S]*?launcher:browser-sol-select/);
+  assert.match(preloadSource, /browserSolSetAutomation:[\s\S]*?launcher:browser-sol-automation/);
+  assert.match(preloadSource, /browserSolTestWake:[\s\S]*?launcher:browser-sol-test-wake/);
+  assert.match(appSource, /One persistent native Codex conversation per project/);
+  assert.match(appSource, /Do not expose task UUIDs|conversation ready/);
+  assert.match(electronMain, /new BrowserSolWorkspaceManager/);
+  assert.match(electronMain, /new CodexOwnerBridge/);
+  assert.doesNotMatch(electronMain, /\["app-server"\]/);
+  assert.doesNotMatch(appSource, /provider_count|queued_count|settlement_id/);
+});
+
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {
   assert.match(
     electronMain,
