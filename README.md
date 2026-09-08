@@ -102,6 +102,10 @@ is optional and guides the full-harness setup without terminal commands.
 The packaged launcher keeps sign-in and ChatGPT model turns in its embedded browser. It needs no
 model API key, installed Chrome/Chromium, system Node/Bun, or project-managed browser download.
 
+The desktop launcher also includes a generic Browser Sol workspace mode: one persistent native Codex
+conversation per project, Any-Clerk settlement-driven continuation, and invisible fresh ChatGPT
+Temporary Chat epochs. See `docs/BROWSER_SOL_MODE.md` for the ownership and dogfood contract.
+
 **Run from source**
 
 ```bash
