@@ -213,6 +213,7 @@ class CodexOwnerBridge {
       "--thread", threadId,
       "--message", message,
       "--model", model,
+      "--sandbox", "read-only",
       "--cd", cwd,
     ];
     await runCodexCommand({
@@ -235,7 +236,6 @@ class CodexOwnerBridge {
       "--json",
       "--model", model,
       "--sandbox", "read-only",
-      "--ask-for-approval", "on-request",
       "--thread-source", "browser-sol",
       "--skip-git-repo-check",
       "--cd", cwd,
