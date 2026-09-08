@@ -111,10 +111,12 @@ Temporary Chat epochs. See `docs/BROWSER_SOL_MODE.md` for the ownership and dogf
 ```bash
 git clone https://github.com/miuuyy/codex-chatgpt-web.git && \
 cd codex-chatgpt-web && \
-bun run app
+./run-app.sh
 ```
 
-This source path requires Bun 1.4.0. The command installs locked dependencies and opens the app.
+The wrapper uses Bun 1.4.0 when it is already available. Otherwise it runs that pinned Bun
+through `npm exec`, so a standard Node.js/npm installation is enough; no virtual environment or
+global Bun install is required. The command installs locked dependencies and opens the app.
 
 ## Modes
 
@@ -198,7 +200,7 @@ Read the complete [architecture](docs/architecture.md) and
 ## Development
 
 ```bash
-bun run app
+./run-app.sh
 bun run dev:launcher
 bun run src/cli.ts dev status
 bun run dev:chat compaction-lab "Reply with exactly: DEV READY"

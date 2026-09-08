@@ -84,13 +84,17 @@ an Any-Clerk settlement delivered.
 Run the launcher from source with the repository’s normal command:
 
 ```bash
-bun run app
+./run-app.sh
 ```
+
+The wrapper uses the pinned Bun runtime when it is available and otherwise obtains that runtime
+through `npm exec`, so a source checkout does not require a virtual environment or a global Bun
+installation.
 
 For a non-default Any-Clerk source during local dogfood:
 
 ```bash
-BROWSER_SOL_WAKE_SOURCE_PATH=/absolute/path/automatic-review-wakes.json bun run app
+BROWSER_SOL_WAKE_SOURCE_PATH=/absolute/path/automatic-review-wakes.json ./run-app.sh
 ```
 
 The browser-only provider path explicitly makes each fresh ChatGPT Temporary Chat Personalized before

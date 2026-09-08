@@ -106,10 +106,12 @@ Free/Go アカウントでは Luna のみが表示され、Pro はサインイ�
 ```bash
 git clone https://github.com/miuuyy/codex-chatgpt-web.git && \
 cd codex-chatgpt-web && \
-bun run app
+./run-app.sh
 ```
 
-この方法には Bun 1.4.0 が必要です。コマンドはロックされた依存関係をインストールしてアプリを開きます。
+このラッパーは、Bun 1.4.0 があればそれを使用し、なければ `npm exec` で固定バージョンを実行します。
+そのため標準の Node.js/npm があれば、仮想環境やグローバルな Bun のインストールは不要です。
+ロックされた依存関係をインストールしてアプリを開きます。
 
 ## モード
 
@@ -188,7 +190,7 @@ Full モードを有効にする前に、完全な[アーキテクチャ](docs/a
 ## 開発
 
 ```bash
-bun run app
+./run-app.sh
 bun run dev:launcher
 bun run src/cli.ts dev status
 bun run dev:chat compaction-lab "Reply with exactly: DEV READY"

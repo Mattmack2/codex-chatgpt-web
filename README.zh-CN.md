@@ -100,10 +100,11 @@ Chrome/Chromium、系统级 Node/Bun，也不会由本项目另行下载浏览�
 ```bash
 git clone https://github.com/miuuyy/codex-chatgpt-web.git && \
 cd codex-chatgpt-web && \
-bun run app
+./run-app.sh
 ```
 
-源码方式需要 Bun 1.4.0。该命令会安装锁定版本的依赖并打开应用。
+该包装器会优先使用 Bun 1.4.0；如果系统没有 Bun，则通过 `npm exec` 使用固定版本。因此只需标准的
+Node.js/npm，无需虚拟环境或全局安装 Bun。该命令会安装锁定版本的依赖并打开应用。
 
 ## 模式
 
@@ -178,7 +179,7 @@ codex-chatgpt-web subagents native
 ## 开发
 
 ```bash
-bun run app
+./run-app.sh
 bun run dev:launcher
 bun run src/cli.ts dev status
 bun run dev:chat compaction-lab "Reply with exactly: DEV READY"
