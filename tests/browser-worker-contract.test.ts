@@ -752,7 +752,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
 });
 
-test("ambiguous send gets exactly one bounded reactivation before the outer guard", { timeout: 10_000 }, async () => {
+test("ambiguous send gets exactly one bounded reactivation before the outer guard", async () => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://send-reactivation-${Date.now()}-${Math.random()}`,
@@ -833,7 +833,7 @@ test("ambiguous send gets exactly one bounded reactivation before the outer guar
   expect(focusCalls).toBe(1);
   expect(acceptanceWaits).toBe(2);
   expect(lifecycle).toEqual(["activated", "activated", "submitted"]);
-});
+}, { timeout: 10_000 });
 
 test("submission observation recovery resumes with rebound locators and is strictly bounded", async () => {
   const provider: CodexProviderConfig = {
@@ -2493,6 +2493,32 @@ test("Think attachment runs after fresh connector selection and rechecks retaine
   }
 });
 
+test("Browser-only connector-capable turns personalize the fresh Temporary Chat before inserting context", async () => {
+  const ui = thinkSlashFixture();
+  const checkpoints: string[] = [];
+  const attach = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt: (...args: unknown[]) => Promise<void>;
+  }).attachPrompt;
+  const page = { getByRole: personalizedTemporaryChatRole };
+  const worker = {
+    config: { personalizedConnectorAccess: true },
+    activeComposer: async () => ui.composer,
+    insertPromptText: async () => {},
+    assertPromptAttached: async () => {},
+  };
+
+  await attach.call(
+    worker,
+    page,
+    "control-plane context",
+    false,
+    async (checkpoint: string) => { checkpoints.push(checkpoint); },
+  );
+
+  expect(checkpoints).toEqual(["personalization-already-enabled"]);
+  expect(ui.state.draft).toBe("");
+});
+
 test("Think attachment rolls back a lost connector and never inserts the prompt", async () => {
   const ui = thinkSlashFixture();
   ui.state.loseConnector = true;
@@ -3976,6 +4002,33 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
 
   // A turn with no status container at all is entirely answer.
   expect(answerFor('<div class="markdown">ONLY ANSWER</div>')).toBe("ONLY ANSWER");
+});
+
+test("the DIL response renderer is extracted and can provide completion evidence without legacy Markdown", () => {
+  const { createDocument } = require("@mixmark-io/domino") as {
+    createDocument: (html: string) => {
+      body: { querySelectorAll: (selector: string) => ArrayLike<HTMLElement> };
+    };
+  };
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const source = worker.split("// CHATGPT_RENDERER_ROOTS_BEGIN")[1]?.split("// CHATGPT_RENDERER_ROOTS_END")[0];
+  if (!source) throw new Error("DIL renderer root sentinels are missing from browser-worker.ts");
+  const javascript = source.replace(/:\s*HTMLElement\[\]/g, "");
+  const selectChatGptRenderedAnswerRoots = new Function(
+    `${javascript}; return selectChatGptRenderedAnswerRoots;`,
+  )() as (markdownAnswerRoots: unknown[], dilRoots: unknown[], markdownRoots: unknown[]) => unknown[];
+
+  const document = createDocument(
+    '<body><div data-dil-widget-copy-target><div class="fv0XaG_DilResponseRoot"><p>CODEX WEB GPT READY</p></div></div></body>',
+  );
+  const dilRoot = Array.from(document.body.querySelectorAll("[data-dil-widget-copy-target]"))[0]!;
+  const answerRoots = selectChatGptRenderedAnswerRoots([], [dilRoot], []);
+
+  expect(answerRoots).toEqual([dilRoot]);
+  expect((answerRoots[0] as HTMLElement).textContent?.trim()).toBe("CODEX WEB GPT READY");
+  expect(worker).toContain("const dilResponseRoots");
+  expect(worker).toContain("const dilCompletionEvidence");
+  expect(worker).toContain("completionAction !== undefined || dilCompletionEvidence");
 });
 
 test("embedded chart hydration cannot replace Markdown answer content with renderer UI", () => {

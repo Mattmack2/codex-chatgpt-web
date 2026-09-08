@@ -295,6 +295,8 @@ export interface CodexProviderConfig {
     headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for every connector-capable Web model. */
     localToolsEnabled?: boolean;
+    /** Ensure automatic Temporary Chat turns are Personalized so ChatGPT-native connectors remain available. */
+    personalizedConnectorAccess?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */
