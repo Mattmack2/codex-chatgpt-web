@@ -535,6 +535,157 @@ code {
   background: transparent;
 }
 
+.browser-sol-panel {
+  flex: 0 0 auto;
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid var(--color-border-light);
+  background: rgb(24 24 24 / 92%);
+}
+
+.browser-sol-heading,
+.browser-sol-controls,
+.browser-sol-project-meta,
+.browser-sol-actions,
+.browser-sol-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-sol-heading {
+  justify-content: space-between;
+}
+
+.browser-sol-heading > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.browser-sol-heading strong {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.browser-sol-heading span,
+.browser-sol-project-meta span,
+.browser-sol-project-meta small {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-sol-projects {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-x: auto;
+}
+
+.browser-sol-project {
+  display: flex;
+  min-width: 150px;
+  max-width: 240px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-secondary);
+  text-align: left;
+}
+
+.browser-sol-project.is-selected {
+  border-color: var(--color-border-focus);
+  background: var(--color-background-control-active);
+}
+
+.browser-sol-project > span {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.browser-sol-project strong {
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-sol-project small,
+.browser-sol-project em {
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.browser-sol-controls {
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.browser-sol-project-meta {
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.browser-sol-project-meta small {
+  color: var(--color-text-disabled);
+}
+
+.browser-sol-actions {
+  flex: none;
+}
+
+.browser-sol-actions .button-primary,
+.browser-sol-actions .button-secondary,
+.browser-sol-add .button-secondary {
+  min-height: 26px;
+  font-size: 10px;
+}
+
+.browser-sol-warning {
+  margin-top: 6px;
+  color: var(--orange-300);
+  font-size: 10px;
+}
+
+.browser-sol-add {
+  margin-top: 8px;
+  align-items: stretch;
+}
+
+.browser-sol-add input {
+  min-width: 0;
+  height: 28px;
+  flex: 1;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+  font-size: 10px;
+}
+
+.browser-sol-add input::placeholder {
+  color: var(--color-text-disabled);
+}
+
 .browser-tab-strip {
   position: relative;
   display: flex;

@@ -13,6 +13,7 @@ import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
   BrowserInteractionMode,
+  BrowserSolState,
   BrowserState,
   DoctorReport,
   Language,
@@ -35,6 +36,7 @@ const MCP_GUIDE_MEDIA = [
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
+  const [browserSol, setBrowserSol] = useState<BrowserSolState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +53,7 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
+      setBrowserSol(next.browserSol);
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
@@ -68,6 +71,10 @@ export function App() {
         : current);
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeBrowserSol = api.onBrowserSolState((next) => {
+      setBrowserSol(next);
+      setSnapshot((current) => current ? { ...current, browserSol: next } : current);
+    });
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -80,6 +87,7 @@ export function App() {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
+      unsubscribeBrowserSol();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
@@ -123,6 +131,7 @@ export function App() {
         ) : (
           <LauncherShell
             browser={browser}
+            browserSol={browserSol ?? snapshot.browserSol}
             copy={copy}
             key="launcher"
             language={language}
@@ -324,6 +333,7 @@ function Onboarding({
 
 function LauncherShell({
   browser,
+  browserSol,
   copy,
   language,
   logs,
@@ -333,6 +343,7 @@ function LauncherShell({
   updateState,
 }: {
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   copy: Copy;
   language: Language;
   logs: LogRecord[];
@@ -652,6 +663,7 @@ function LauncherShell({
             {surface === "browser" ? (
               <BrowserSurface
                 browser={browser}
+                browserSol={browserSol}
                 browserSlotRef={browserSlotRef}
                 copy={copy}
                 interactionMode={snapshot.state.browserInteractionMode}
@@ -808,6 +820,7 @@ function SidebarItem({
 
 function BrowserSurface({
   browser,
+  browserSol,
   browserSlotRef,
   copy,
   interactionMode,
@@ -816,6 +829,7 @@ function BrowserSurface({
   setError,
 }: {
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
   interactionMode: BrowserInteractionMode;
@@ -907,6 +921,7 @@ function BrowserSurface({
 
   return (
     <section className="browser-surface">
+      <BrowserSolPanel browserSol={browserSol} setError={setError} />
       <div className="browser-tab-strip" title={copy.browserTabLimit}>
         {(browser?.tabs ?? []).map((tab) => (
           <div
@@ -1033,6 +1048,120 @@ function BrowserSurface({
         )}
       </div>
     </section>
+  );
+}
+
+function BrowserSolPanel({
+  browserSol,
+  setError,
+}: {
+  browserSol: BrowserSolState;
+  setError: (error: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [projectKey, setProjectKey] = useState("");
+  const [cwd, setCwd] = useState("");
+  const selected = browserSol.workspaces.find(workspace => workspace.projectKey === browserSol.selectedProjectKey)
+    || browserSol.workspaces[0]
+    || null;
+
+  const run = async (action: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addWorkspace = async () => {
+    await run(async () => {
+      await api!.browserSolCreate({ displayName, projectKey, cwd });
+      setDisplayName("");
+      setProjectKey("");
+      setCwd("");
+      setAddOpen(false);
+    });
+  };
+
+  return (
+    <div className="browser-sol-panel">
+      <div className="browser-sol-heading">
+        <div>
+          <strong>Browser Sol workspaces</strong>
+          <span>One persistent native Codex conversation per project; ChatGPT browser turns remain temporary.</span>
+        </div>
+        <button className="toolbar-text-button" onClick={() => setAddOpen(open => !open)} type="button">
+          {addOpen ? "Cancel" : "Add project"}
+        </button>
+      </div>
+      {browserSol.lastError ? <div className="browser-sol-warning">{browserSol.lastError}</div> : null}
+      <div className="browser-sol-projects">
+        {browserSol.workspaces.map(workspace => (
+          <button
+            className={`browser-sol-project${workspace.projectKey === selected?.projectKey ? " is-selected" : ""}`}
+            key={workspace.projectKey}
+            onClick={() => void run(() => api!.browserSolSelect(workspace.projectKey))}
+            type="button"
+          >
+            <StateDot state={workspace.taskStatus === "error" ? "error" : ["busy", "starting", "unknown"].includes(workspace.taskStatus) ? "busy" : workspace.threadReady ? "ready" : "idle"} />
+            <span>
+              <strong>{workspace.displayName}</strong>
+              <small>{workspace.automationEnabled ? "Automation on" : "Automation off"} · {workspace.threadReady ? "conversation ready" : "not started"}</small>
+            </span>
+            {workspace.pending ? <em>pending</em> : null}
+          </button>
+        ))}
+      </div>
+      {selected ? (
+        <div className="browser-sol-controls">
+          <div className="browser-sol-project-meta">
+            <span>{selected.cwd}</span>
+            <small>{selected.sourceStatus === "ready" ? "Automation source connected" : "Automation source unavailable"}</small>
+          </div>
+          <div className="browser-sol-actions">
+            <button
+              className="button-primary"
+              disabled={busy || ["busy", "starting"].includes(selected.taskStatus)}
+              onClick={() => void run(() => api!.browserSolOpen(selected.projectKey))}
+              type="button"
+            >
+              {selected.threadReady ? "Continue conversation" : "Start conversation"}
+            </button>
+            <button
+              className="button-secondary"
+              disabled={busy}
+              onClick={() => void run(() => api!.browserSolSetAutomation(selected.projectKey, !selected.automationEnabled))}
+              type="button"
+            >
+              {selected.automationEnabled ? "Automation on" : "Automation off"}
+            </button>
+            <button
+              className="button-secondary"
+              disabled={busy || !selected.threadReady}
+              onClick={() => void run(() => api!.browserSolTestWake(selected.projectKey))}
+              type="button"
+            >
+              Test wake
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {addOpen ? (
+        <div className="browser-sol-add">
+          <input aria-label="Project name" onChange={event => setDisplayName(event.target.value)} placeholder="Project name" value={displayName} />
+          <input aria-label="Project key" onChange={event => setProjectKey(event.target.value)} placeholder="project:github.com/org/repo" value={projectKey} />
+          <input aria-label="Project directory" onChange={event => setCwd(event.target.value)} placeholder="/absolute/project/directory" value={cwd} />
+          <button className="button-secondary" disabled={busy || !displayName || !projectKey || !cwd} onClick={() => void addWorkspace()} type="button">Save project</button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

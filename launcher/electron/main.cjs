@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -30,6 +31,10 @@ const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
+const { CodexOwnerBridge } = require("./browser-sol/owner-bridge.cjs");
+const { BrowserSolNativeTask } = require("./browser-sol/native-task.cjs");
+const { BrowserSolWorkspaceManager } = require("./browser-sol/workspace-manager.cjs");
+const { BrowserSolWorkspaceStore } = require("./browser-sol/workspace-store.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -70,6 +75,20 @@ fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
+const BROWSER_SOL_DEFAULT_PROJECT_KEY = "project:github.com/mattmack2/evo-devo-lab";
+const BROWSER_SOL_DATA_DIR = path.join(launcherUserData, "browser-sol");
+const BROWSER_SOL_REGISTRY_PATH = path.join(BROWSER_SOL_DATA_DIR, "workspaces.json");
+const BROWSER_SOL_LEGACY_TASK_PATH = path.join(BROWSER_SOL_DATA_DIR, "task.json");
+const BROWSER_SOL_LEGACY_LEDGER_PATH = path.join(BROWSER_SOL_DATA_DIR, "wake-ledger.json");
+const BROWSER_SOL_WAKE_SOURCE_PATH = path.isAbsolute(process.env.BROWSER_SOL_WAKE_SOURCE_PATH || "")
+  ? process.env.BROWSER_SOL_WAKE_SOURCE_PATH
+  : path.join(os.homedir(), ".local", "share", "any-clerk", "automatic-review-wakes.json");
+const BROWSER_SOL_CWD = [
+  process.env.BROWSER_SOL_CWD,
+  path.join(os.homedir(), "Projects", "evo-devo-lab"),
+  path.join(os.homedir(), "src", "evo-devo-lab"),
+  SOURCE_ROOT,
+].find(candidate => typeof candidate === "string" && path.isAbsolute(candidate) && fs.existsSync(candidate)) || SOURCE_ROOT;
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
 });
@@ -91,6 +110,8 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let browserSolStore = null;
+let browserSolManager = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -109,6 +130,60 @@ function send(channel, value) {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send(channel, value);
   }
+}
+
+function emptyBrowserSolSnapshot() {
+  return {
+    status: "stopped",
+    sourcePath: BROWSER_SOL_WAKE_SOURCE_PATH,
+    selectedProjectKey: null,
+    workspaces: [],
+    activeProjectKey: null,
+    lastError: "Browser Sol workspace manager is not initialized",
+  };
+}
+
+function browserSolSnapshot() {
+  return browserSolManager?.snapshot?.() || emptyBrowserSolSnapshot();
+}
+
+function publishBrowserSolState() {
+  send("launcher:browser-sol-state", browserSolSnapshot());
+}
+
+async function initializeBrowserSol({ logger }) {
+  fs.mkdirSync(BROWSER_SOL_DATA_DIR, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") fs.chmodSync(BROWSER_SOL_DATA_DIR, 0o700);
+  browserSolStore = new BrowserSolWorkspaceStore({
+    filePath: BROWSER_SOL_REGISTRY_PATH,
+    legacyTaskPath: BROWSER_SOL_LEGACY_TASK_PATH,
+    legacyLedgerPath: BROWSER_SOL_LEGACY_LEDGER_PATH,
+    defaultWorkspace: {
+      projectKey: BROWSER_SOL_DEFAULT_PROJECT_KEY,
+      displayName: "EvoDevo",
+      cwd: BROWSER_SOL_CWD,
+      automationEnabled: false,
+    },
+  });
+  const ownerBridge = new CodexOwnerBridge({
+    codexHome: LAUNCHER_PROFILE.codexHome,
+    logger,
+  });
+  browserSolManager = new BrowserSolWorkspaceManager({
+    store: browserSolStore,
+    sourcePath: BROWSER_SOL_WAKE_SOURCE_PATH,
+    logger,
+    onChange: publishBrowserSolState,
+    taskFactory: ({ workspace, updateWorkspace, onStateChange }) => new BrowserSolNativeTask({
+      workspace,
+      ownerBridge,
+      updateWorkspace,
+      logger,
+      onStateChange,
+    }),
+  });
+  await browserSolManager.start();
+  publishBrowserSolState();
 }
 
 function publishOperation(operation) {
@@ -431,6 +506,7 @@ function registerIpc({ logger, stateStore }) {
     },
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    browserSol: browserSolSnapshot(),
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
@@ -491,6 +567,37 @@ function registerIpc({ logger, stateStore }) {
     stateStore.read().browserInteractionMode === "automatic",
   ));
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
+  handle("launcher:browser-sol-select", (_event, projectKey) => {
+    if (!browserSolManager) throw new Error("Browser Sol workspace manager is unavailable");
+    browserSolManager.select(projectKey);
+    return browserSolSnapshot();
+  });
+  handle("launcher:browser-sol-create", (_event, input) => {
+    if (!browserSolManager) throw new Error("Browser Sol workspace manager is unavailable");
+    if (!input || typeof input !== "object") throw new Error("Browser Sol project details are required");
+    browserSolManager.addWorkspace({
+      projectKey: input.projectKey,
+      displayName: input.displayName,
+      cwd: input.cwd,
+      automationEnabled: false,
+    });
+    return browserSolSnapshot();
+  });
+  handle("launcher:browser-sol-open", async (_event, projectKey) => {
+    if (!browserSolManager) throw new Error("Browser Sol workspace manager is unavailable");
+    await browserSolManager.open(projectKey || browserSolStore?.read()?.selectedProjectKey);
+    return browserSolSnapshot();
+  });
+  handle("launcher:browser-sol-automation", async (_event, projectKey, enabled) => {
+    if (!browserSolManager) throw new Error("Browser Sol workspace manager is unavailable");
+    return browserSolManager.setAutomation(projectKey, enabled === true);
+  });
+  handle("launcher:browser-sol-test-wake", async (_event, projectKey) => {
+    if (!browserSolManager) throw new Error("Browser Sol workspace manager is unavailable");
+    const result = await browserSolManager.explicitTestWake(projectKey || browserSolStore?.read()?.selectedProjectKey);
+    if (result.status !== "delivered") throw new Error(result.message || "Browser Sol test wake was not delivered");
+    return browserSolSnapshot();
+  });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
@@ -878,6 +985,7 @@ async function requestQuit() {
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
+    browserSolManager?.stop();
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
@@ -1020,6 +1128,7 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  await initializeBrowserSol({ logger });
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),

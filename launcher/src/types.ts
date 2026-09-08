@@ -60,6 +60,31 @@ export interface BrowserTabState {
   canConfirmSent?: boolean;
 }
 
+export type BrowserSolTaskStatus = "idle" | "busy" | "starting" | "unknown" | "unavailable" | "error";
+export type BrowserSolSourceStatus = "ready" | "unavailable";
+
+export interface BrowserSolWorkspaceSummary {
+  projectKey: string;
+  displayName: string;
+  cwd: string;
+  automationEnabled: boolean;
+  pending: boolean;
+  threadReady: boolean;
+  taskStatus: BrowserSolTaskStatus;
+  sourceStatus: BrowserSolSourceStatus;
+  lastWakeAt: string | null;
+  lastError: string | null;
+}
+
+export interface BrowserSolState {
+  status: "running" | "stopped";
+  sourcePath: string;
+  selectedProjectKey: string | null;
+  workspaces: BrowserSolWorkspaceSummary[];
+  activeProjectKey: string | null;
+  lastError: string | null;
+}
+
 export interface LogRecord {
   at: string;
   level: "debug" | "info" | "warning" | "error";
@@ -100,6 +125,7 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
@@ -141,6 +167,11 @@ export interface LauncherApi {
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
+  browserSolSelect(projectKey: string): Promise<BrowserSolState>;
+  browserSolCreate(input: { projectKey: string; displayName: string; cwd: string }): Promise<BrowserSolState>;
+  browserSolOpen(projectKey?: string): Promise<BrowserSolState>;
+  browserSolSetAutomation(projectKey: string, enabled: boolean): Promise<BrowserSolState>;
+  browserSolTestWake(projectKey?: string): Promise<BrowserSolState>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
@@ -174,6 +205,7 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  onBrowserSolState(listener: (state: BrowserSolState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
