@@ -14,6 +14,7 @@ import { Icon, type IconName } from "./icons";
 import type {
   BrowserInteractionMode,
   BrowserState,
+  BrowserSolState,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -35,6 +36,7 @@ const MCP_GUIDE_MEDIA = [
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
+  const [browserSol, setBrowserSol] = useState<BrowserSolState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +53,7 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
+      setBrowserSol(next.browserSol);
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
@@ -68,6 +71,7 @@ export function App() {
         : current);
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeBrowserSol = api.onBrowserSolState(setBrowserSol);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -80,6 +84,7 @@ export function App() {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
+      unsubscribeBrowserSol();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
@@ -123,6 +128,7 @@ export function App() {
         ) : (
           <LauncherShell
             browser={browser}
+            browserSol={browserSol ?? snapshot.browserSol}
             copy={copy}
             key="launcher"
             language={language}
@@ -324,6 +330,7 @@ function Onboarding({
 
 function LauncherShell({
   browser,
+  browserSol,
   copy,
   language,
   logs,
@@ -333,6 +340,7 @@ function LauncherShell({
   updateState,
 }: {
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   copy: Copy;
   language: Language;
   logs: LogRecord[];
@@ -652,6 +660,7 @@ function LauncherShell({
             {surface === "browser" ? (
               <BrowserSurface
                 browser={browser}
+                browserSol={browserSol}
                 browserSlotRef={browserSlotRef}
                 copy={copy}
                 interactionMode={snapshot.state.browserInteractionMode}
@@ -808,6 +817,7 @@ function SidebarItem({
 
 function BrowserSurface({
   browser,
+  browserSol,
   browserSlotRef,
   copy,
   interactionMode,
@@ -816,6 +826,7 @@ function BrowserSurface({
   setError,
 }: {
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
   interactionMode: BrowserInteractionMode;
@@ -907,6 +918,7 @@ function BrowserSurface({
 
   return (
     <section className="browser-surface">
+      <BrowserSolPanel browser={browser} browserSol={browserSol} copy={copy} setError={setError} />
       <div className="browser-tab-strip" title={copy.browserTabLimit}>
         {(browser?.tabs ?? []).map((tab) => (
           <div
@@ -1032,6 +1044,102 @@ function BrowserSurface({
           </div>
         )}
       </div>
+    </section>
+  );
+}
+
+function BrowserSolPanel({
+  browser,
+  browserSol,
+  copy,
+  setError,
+}: {
+  browser: BrowserState | null;
+  browserSol: BrowserSolState;
+  copy: Copy;
+  setError: (error: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const browserReady = browser?.authenticated === true
+    && browser.status !== "error"
+    && browser.status !== "signed-out";
+  const taskState = browserSol.task.status === "busy" ? "busy"
+    : browserSol.task.connected ? "ready" : "error";
+  const run = async (action: () => Promise<BrowserSolState>) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const browserStatus = browserReady ? copy.browserSolBrowserReady : copy.browserSolBrowserError;
+  const taskStatus = browserSol.task.status === "busy"
+    ? copy.browserSolBusy
+    : browserSol.task.connected ? copy.browserSolConnected : copy.browserSolUnavailable;
+  const wakeStatus = browserSol.armed ? copy.browserSolArmed : copy.browserSolOff;
+  const contextStatus = browserSol.task.contextStatus === "checkpointing"
+    ? copy.browserSolCheckpointing
+    : browserSol.task.contextStatus === "rolled-over" ? copy.browserSolRolledOver : copy.browserSolNormal;
+  return (
+    <section className="browser-sol-panel" aria-label={copy.browserSolTitle}>
+      <div className="browser-sol-heading">
+        <div className="browser-sol-identity">
+          <BrandMark small />
+          <strong>{copy.browserSolTitle}</strong>
+          <span>{copy.browserSolProject}</span>
+        </div>
+        <div className="browser-sol-actions">
+          <SecondaryButton
+            disabled={busy}
+            onClick={() => void run(() => api!.openBrowserSol())}
+          >
+            {copy.browserSolOpen}
+          </SecondaryButton>
+          <SecondaryButton
+            disabled={busy}
+            onClick={() => void run(() => browserSol.armed ? api!.disarmBrowserSol() : api!.armBrowserSol())}
+          >
+            {browserSol.armed ? copy.browserSolDisarm : copy.browserSolArm}
+          </SecondaryButton>
+          <SecondaryButton
+            disabled={busy || !browserSol.task.connected}
+            onClick={() => void run(() => api!.testBrowserSolWake())}
+          >
+            {copy.browserSolTest}
+          </SecondaryButton>
+        </div>
+      </div>
+      <div className="browser-sol-statuses">
+        <span className="browser-sol-status">
+          <StateDot state={browserReady ? "ready" : "error"} />
+          <span>{copy.browserSolBrowserStatus}</span>
+          <strong>{browserStatus}</strong>
+        </span>
+        <span className="browser-sol-status">
+          <StateDot state={taskState} />
+          <span>{copy.browserSolTaskStatus}</span>
+          <strong>{taskStatus}</strong>
+        </span>
+        <span className="browser-sol-status">
+          <StateDot state={browserSol.armed ? "ready" : "idle"} />
+          <span>{copy.browserSolWake}</span>
+          <strong>{wakeStatus}</strong>
+        </span>
+      </div>
+      <div className="browser-sol-details">
+        <span><label>{copy.browserSolProviders}</label><strong>{browserSol.providerActiveCount} / {browserSol.providerQueuedCount}</strong></span>
+        <span><label>{copy.browserSolWave}</label><strong title={browserSol.wave || undefined}>{shortBrowserSolId(browserSol.wave, copy)}</strong></span>
+        <span><label>{copy.browserSolSettlement}</label><strong title={browserSol.settlement || undefined}>{shortBrowserSolId(browserSol.settlement, copy)}</strong></span>
+        <span><label>{copy.browserSolLastWake}</label><strong>{formatBrowserSolTime(browserSol.lastWakeAt, copy)}</strong></span>
+        <span className="browser-sol-context"><label>{copy.browserSolContext}</label><strong title={browserSol.task.context}>{contextStatus}</strong></span>
+        <span><label>{copy.browserSolLastRollover}</label><strong>{formatBrowserSolTime(browserSol.task.lastRolloverAt, copy)}</strong></span>
+      </div>
+      {browserSol.pending ? <div className="browser-sol-pending">{copy.browserSolPending}: {browserSol.lastError || copy.browserSolPendingBody}</div> : null}
     </section>
   );
 }
@@ -2524,6 +2632,18 @@ function formatBrowserAddress(url: string | undefined, copy: Copy): string {
   } catch {
     return copy.browserAddress;
   }
+}
+
+function shortBrowserSolId(value: string | null, copy: Copy): string {
+  if (!value) return copy.browserSolNoValue;
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function formatBrowserSolTime(value: string | null, copy: Copy): string {
+  if (!value) return copy.browserSolNoValue;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return copy.browserSolNoValue;
+  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function messageOf(value: unknown): string {

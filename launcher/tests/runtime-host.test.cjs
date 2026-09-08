@@ -61,12 +61,14 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
 }
 
 test("core setup preserves an existing full-harness installation", async () => {
-  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2", port: 17842 });
   const result = await fixture.host.setupCore();
   assert.equal(result.mode, "full");
   assert.deepEqual(fixture.invocation().args, [
     "setup",
     "--full",
+    "--port",
+    "17842",
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
@@ -93,6 +95,9 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
   assert.equal(fixture.invocation().args.includes("--replace-codex-route"), true);
   assert.equal(fixture.invocation().args.includes("--chrome"), false);
+  const portIndex = fixture.invocation().args.indexOf("--port");
+  assert.ok(portIndex >= 0);
+  assert.match(fixture.invocation().args[portIndex + 1], /^\d+$/);
 });
 
 test("core setup refuses an implicit Automatic fallback for a new Zero Risk installation", async () => {

@@ -1252,6 +1252,7 @@ export interface ResolvedBrowserConfig {
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
+  personalizedConnectorAccess?: boolean;
 }
 
 export function chatGptTurnIsComplete(state: {
@@ -2026,6 +2027,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
+    ...(configured.personalizedConnectorAccess === true ? { personalizedConnectorAccess: true } : {}),
   };
 }
 
@@ -3282,6 +3284,14 @@ export class ChatGptBrowserWorker {
     let composerMutationStarted = false;
     try {
       if (connectorMode !== "mention") {
+        // A new leased Browser Sol tab is a fresh Temporary Chat document. ChatGPT does not carry
+        // the primary page's Personalized choice into that document, so make the connected
+        // browser-only route explicit before inserting the prompt. This is intentionally scoped
+        // to the provider flag; ordinary browser-only adapters remain unchanged unless their
+        // configuration opts into native connector access.
+        if (connectorMode === "none" && this.config?.personalizedConnectorAccess) {
+          await ensureChatGptPersonalizedConnectorAccess(page, captureDiagnostic, undefined, abortSignal);
+        }
         const composer = await this.activeComposer(page, 30_000, abortSignal);
         // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
         // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
@@ -3877,6 +3887,14 @@ export class ChatGptBrowserWorker {
       const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]
         .filter(candidate => !candidate.parentElement?.closest(".markdown"))
         .filter(renderedInDom);
+      // New ChatGPT turns may use the DIL renderer instead of the legacy `.markdown` renderer.
+      // Its stable copy target is the response surface itself, and completed answers do not expose
+      // the legacy copy-turn action button. Keep this fallback scoped to the current assistant turn
+      // and exclude nested targets so the answer is extracted exactly once.
+      const dilResponseRoots = [...root.querySelectorAll<HTMLElement>("[data-dil-widget-copy-target]")]
+        .filter(candidate => !candidate.parentElement?.closest("[data-dil-widget-copy-target]"))
+        .filter(candidate => !candidate.closest(".markdown"))
+        .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
         .filter(renderedInDom);
       // CHATGPT_COMMENTARY_CLASSIFIER_BEGIN
@@ -3910,7 +3928,25 @@ export class ChatGptBrowserWorker {
       // CHATGPT_COMMENTARY_CLASSIFIER_END
       const classified = selectChatGptAnswerRoots(allMarkdownRoots, streamingStatusContainers);
       const commentaryRoots = classified.commentaryRoots;
-      const renderedRoots = classified.answerRoots;
+      // CHATGPT_RENDERER_ROOTS_BEGIN
+      // Self-contained so the DIL fallback is covered by a DOM contract test, not only a string
+      // assertion. The answer-root list is ordered in document order before extraction.
+      const selectChatGptRenderedAnswerRoots = (
+        markdownAnswerRoots: HTMLElement[],
+        dilRoots: HTMLElement[],
+        markdownRoots: HTMLElement[],
+      ): HTMLElement[] => [
+        ...markdownAnswerRoots,
+        ...dilRoots.filter(candidate => !markdownRoots.some(markdownRoot => markdownRoot.contains(candidate))),
+      ].sort((left, right) => left === right
+        ? 0
+        : left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+      // CHATGPT_RENDERER_ROOTS_END
+      const renderedRoots = selectChatGptRenderedAnswerRoots(
+        classified.answerRoots,
+        dilResponseRoots,
+        allMarkdownRoots,
+      );
       // CHATGPT_MARKDOWN_CONTENT_BEGIN
       const chatGptMarkdownContent = (markdownRoot: HTMLElement): HTMLElement => {
         const content = markdownRoot.cloneNode(true) as HTMLElement;
@@ -4193,21 +4229,28 @@ export class ChatGptBrowserWorker {
         }
         return false;
       })();
+      const dilCompletionEvidence = dilResponseRoots.some(candidate => {
+        const text = markdownText(candidate);
+        if (!text) return false;
+        if (candidate.querySelector("[data-streaming-response-status], [aria-busy=\"true\"]")) return false;
+        return ![...document.querySelectorAll<HTMLElement>(options.stopButtonSelector)].some(renderedInDom);
+      });
       return {
         key: observerKey,
         snapshot: {
           responsePresent: true,
           domRevision: observerKey,
-          visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
+          visibleText: renderedRoots.map(markdownText).filter(Boolean).join("\n\n"),
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
-          completionActionVisible: completionAction !== undefined,
+          completionActionVisible: completionAction !== undefined || dilCompletionEvidence,
           stoppedThinkingVisible,
           traceBlocks,
         },
       };
     }, {
       completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
+      stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
     }, { timeout: 2_000 }).catch(() => undefined);

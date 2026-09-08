@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -16,6 +17,8 @@ const {
   Tray,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { BrowserSolNativeTask } = require("./browser-sol/native-task.cjs");
+const { BrowserSolWakeController } = require("./browser-sol/wake-controller.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
@@ -70,6 +73,19 @@ fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
+const BROWSER_SOL_PROJECT_KEY = "project:github.com/mattmack2/evo-devo-lab";
+const BROWSER_SOL_DATA_DIR = path.join(launcherUserData, "browser-sol");
+const BROWSER_SOL_WAKE_SOURCE_PATH = path.isAbsolute(process.env.BROWSER_SOL_WAKE_SOURCE_PATH || "")
+  ? process.env.BROWSER_SOL_WAKE_SOURCE_PATH
+  : path.join(os.homedir(), ".local", "share", "any-clerk", "automatic-review-wakes.json");
+const BROWSER_SOL_CWD = [
+  process.env.BROWSER_SOL_CWD,
+  path.join(os.homedir(), "Projects", "evo-devo-lab"),
+  path.join(os.homedir(), "src", "evo-devo-lab"),
+  SOURCE_ROOT,
+].find(candidate => typeof candidate === "string" && path.isAbsolute(candidate) && fs.existsSync(candidate)) || SOURCE_ROOT;
+const BROWSER_SOL_LEDGER_PATH = path.join(BROWSER_SOL_DATA_DIR, "wake-ledger.json");
+const BROWSER_SOL_TASK_PATH = path.join(BROWSER_SOL_DATA_DIR, "task.json");
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
 });
@@ -91,6 +107,57 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let browserSolTask = null;
+let browserSolWake = null;
+
+function emptyBrowserSolTaskSnapshot() {
+  return {
+    status: "unavailable",
+    connected: false,
+    threadId: null,
+    title: "Browser Sol",
+    model: "ChatGPT Web",
+    effort: "high",
+    context: "Native Codex durable task history with automatic compaction/handoff",
+    contextStatus: "normal",
+    lastRolloverAt: null,
+    lastWakeAt: null,
+    lastError: "Browser Sol task is not initialized",
+    activeTurnId: null,
+  };
+}
+
+function browserSolSnapshot() {
+  if (browserSolWake) return browserSolWake.snapshot();
+  return {
+    project: "evodevo",
+    projectKey: BROWSER_SOL_PROJECT_KEY,
+    sourceStatus: "unavailable",
+    sourceMessage: "Browser Sol wake controller is not initialized",
+    providerActiveCount: 0,
+    providerQueuedCount: 0,
+    unfinished: 0,
+    previousUnfinished: 0,
+    wave: null,
+    settlement: null,
+    settledAt: null,
+    autoWake: "off",
+    armed: false,
+    baselineSettlementId: null,
+    lastSeenWaveId: null,
+    lastDeliveredSettlementId: null,
+    pendingSettlementId: null,
+    pending: false,
+    lastWakeAt: null,
+    deliveryInFlight: false,
+    lastError: null,
+    task: browserSolTask?.snapshot?.() || emptyBrowserSolTaskSnapshot(),
+  };
+}
+
+function publishBrowserSolState() {
+  send("launcher:browser-sol-state", browserSolSnapshot());
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -272,6 +339,17 @@ async function openWebUrl(url) {
   await shell.openExternal(parsed.toString());
 }
 
+async function openBrowserSolThread(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error("Browser Sol returned an invalid Codex task link"); }
+  if (parsed.protocol !== "codex:" || parsed.hostname !== "threads"
+    || !/^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.pathname)
+    || parsed.search || parsed.hash) {
+    throw new Error("Refusing to open an unverified Browser Sol task link");
+  }
+  await shell.openExternal(parsed.toString());
+}
+
 function rendererNavigationAllowed(value) {
   let target;
   try {
@@ -431,6 +509,7 @@ function registerIpc({ logger, stateStore }) {
     },
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    browserSol: browserSolSnapshot(),
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
@@ -533,6 +612,25 @@ function registerIpc({ logger, stateStore }) {
     stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
     smokePassedThisSession = true;
     return result;
+  });
+  handle("launcher:browser-sol-open", async () => {
+    if (!browserSolTask) throw new Error("Browser Sol task control is unavailable");
+    await browserSolTask.openOrResume();
+    publishBrowserSolState();
+    return browserSolSnapshot();
+  });
+  handle("launcher:browser-sol-arm", async () => {
+    if (!browserSolWake) throw new Error("Browser Sol wake controller is unavailable");
+    return browserSolWake.arm();
+  });
+  handle("launcher:browser-sol-disarm", async () => {
+    if (!browserSolWake) throw new Error("Browser Sol wake controller is unavailable");
+    return browserSolWake.disarm();
+  });
+  handle("launcher:browser-sol-test-wake", async () => {
+    if (!browserSolWake) throw new Error("Browser Sol wake controller is unavailable");
+    await browserSolWake.explicitTestWake();
+    return browserSolSnapshot();
   });
   handle("launcher:mcp-verify", async (event) => {
     const operationName = "mcp-verification";
@@ -878,6 +976,8 @@ async function requestQuit() {
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
+    browserSolWake?.stop();
+    browserSolTask?.close();
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
@@ -1020,6 +1120,24 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  browserSolTask = new BrowserSolNativeTask({
+    identityPath: BROWSER_SOL_TASK_PATH,
+    codexHome: LAUNCHER_PROFILE.codexHome,
+    cwd: BROWSER_SOL_CWD,
+    openExternal: openBrowserSolThread,
+    logger,
+  });
+  browserSolTask.setStateChangeListener(() => publishBrowserSolState());
+  browserSolWake = new BrowserSolWakeController({
+    sourcePath: BROWSER_SOL_WAKE_SOURCE_PATH,
+    projectKey: BROWSER_SOL_PROJECT_KEY,
+    ledgerPath: BROWSER_SOL_LEDGER_PATH,
+    deliverWake: input => browserSolTask.sendWake(input),
+    getTaskSnapshot: () => browserSolTask.snapshot(),
+    logger,
+    onChange: () => publishBrowserSolState(),
+  });
+  await browserSolWake.start();
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -1080,6 +1198,8 @@ async function start() {
       packaged: app.isPackaged,
       runtimeVerified: true,
     })}\n`);
+    browserSolWake?.stop();
+    browserSolTask?.close();
     browserHost.destroy();
     await browserControl.close();
     mainWindow.destroy();

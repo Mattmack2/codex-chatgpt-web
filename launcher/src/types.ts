@@ -60,6 +60,49 @@ export interface BrowserTabState {
   canConfirmSent?: boolean;
 }
 
+export type BrowserSolTaskStatus = "idle" | "busy" | "unavailable";
+export type BrowserSolContextStatus = "normal" | "checkpointing" | "rolled-over";
+
+export interface BrowserSolTaskState {
+  status: BrowserSolTaskStatus;
+  connected: boolean;
+  threadId: string | null;
+  title: string;
+  model: string;
+  effort: string;
+  context: string;
+  contextStatus: BrowserSolContextStatus;
+  lastRolloverAt: string | null;
+  lastWakeAt: string | null;
+  lastError: string | null;
+  activeTurnId: string | null;
+}
+
+export interface BrowserSolState {
+  project: "evodevo";
+  projectKey: string;
+  sourceStatus: "ready" | "unavailable";
+  sourceMessage: string | null;
+  providerActiveCount: number;
+  providerQueuedCount: number;
+  unfinished: number;
+  previousUnfinished: number;
+  wave: string | null;
+  settlement: string | null;
+  settledAt: string | null;
+  autoWake: "armed" | "off";
+  armed: boolean;
+  baselineSettlementId: string | null;
+  lastSeenWaveId: string | null;
+  lastDeliveredSettlementId: string | null;
+  pendingSettlementId: string | null;
+  pending: boolean;
+  lastWakeAt: string | null;
+  deliveryInFlight: boolean;
+  lastError: string | null;
+  task: BrowserSolTaskState;
+}
+
 export interface LogRecord {
   at: string;
   level: "debug" | "info" | "warning" | "error";
@@ -100,6 +143,7 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
+  browserSol: BrowserSolState;
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
@@ -141,6 +185,10 @@ export interface LauncherApi {
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
+  openBrowserSol(): Promise<BrowserSolState>;
+  armBrowserSol(): Promise<BrowserSolState>;
+  disarmBrowserSol(): Promise<BrowserSolState>;
+  testBrowserSolWake(): Promise<BrowserSolState>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
@@ -174,6 +222,7 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  onBrowserSolState(listener: (state: BrowserSolState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;

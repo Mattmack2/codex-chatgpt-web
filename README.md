@@ -62,6 +62,9 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
 - **Fail-closed behavior.** Missing models, tools, or changed ChatGPT UI produce explicit errors
   instead of silently switching route or capability. End-to-end coverage is documented in
   [release validation](docs/release-validation.md).
+- **Browser Sol desktop mode.** The EvoDevo workflow keeps the normal Temporary Chat surface while
+  adding a durable native task, read-only provider-wave settlement wakes, and a small status strip.
+  See [Browser Sol mode](docs/BROWSER_SOL_MODE.md).
 
 Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
 processed by OpenAI and are subject to the account's settings and OpenAI's

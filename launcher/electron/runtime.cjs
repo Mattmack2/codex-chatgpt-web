@@ -1,6 +1,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const net = require("node:net");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
@@ -25,6 +26,33 @@ const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const PASSKEY_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_PASSKEY_STATE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PASSKEY_MARKER_FILE_BYTES = 64 * 1024;
+
+async function chooseSetupPort(preferred = 17_841) {
+  const server = net.createServer();
+  server.unref();
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(preferred, "127.0.0.1", () => {
+        server.close(error => error ? reject(error) : resolve());
+      });
+    });
+    return preferred;
+  } catch {
+    try { server.close(); } catch {}
+    return await new Promise((resolve, reject) => {
+      const fallback = net.createServer();
+      fallback.unref();
+      fallback.once("error", reject);
+      fallback.listen(0, "127.0.0.1", () => {
+        const address = fallback.address();
+        const port = address && typeof address === "object" ? address.port : 0;
+        fallback.close(error => error ? reject(error) : resolve(port));
+      });
+    });
+  }
+}
+
 function collect(stream, chunks, onLine, onError) {
   let buffered = "";
   let bytes = 0;
@@ -996,6 +1024,9 @@ class RuntimeHost {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
     const mode = existing.mode;
+    const port = existing.configured && Number.isInteger(existing.config?.port)
+      ? existing.config.port
+      : await chooseSetupPort();
     const interactionMode = existing.configured
       ? existing.config?.browserInteractionMode ?? this.browserInteractionMode()
       : this.browserInteractionMode();
@@ -1005,6 +1036,8 @@ class RuntimeHost {
     const args = [
       "setup",
       mode === "full" ? "--full" : "--browser-only",
+      "--port",
+      String(port),
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({

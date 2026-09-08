@@ -604,6 +604,9 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
+      // Browser-only is the Browser Sol/control-plane route: it has no local tools, but it still
+      // needs ChatGPT-native connectors such as GitHub on every fresh Temporary Chat document.
+      personalizedConnectorAccess: !manual && config.mode === "browser-only",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,

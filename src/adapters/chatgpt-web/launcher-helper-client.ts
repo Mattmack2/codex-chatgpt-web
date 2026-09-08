@@ -289,6 +289,7 @@ export class LauncherBrowserHelperClient {
             browserDiagnosticsPath: this.config.browserDiagnosticsPath,
             turnTimeoutMs: this.config.turnTimeoutMs,
             autoApproveToolCalls: this.config.autoApproveToolCalls,
+            ...(this.config.personalizedConnectorAccess ? { personalizedConnectorAccess: true } : {}),
           },
           turn: {
             traceId: turn.traceId,
