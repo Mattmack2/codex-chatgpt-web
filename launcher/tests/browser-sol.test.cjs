@@ -138,6 +138,8 @@ test("owner bridge queues through the installed Codex CLI without spawning an ap
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args[0], "queue");
   assert.equal(calls[0].args.includes("app-server"), false);
+  const sandboxIndex = calls[0].args.indexOf("--sandbox");
+  assert.deepEqual(calls[0].args.slice(sandboxIndex, sandboxIndex + 2), ["--sandbox", "read-only"]);
   assert.deepEqual(calls[0].args.slice(-2), ["--cd", "/tmp/project"]);
 });
 
